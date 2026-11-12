@@ -1,4 +1,5 @@
 import { createClient as createSupabaseClient } from '@supabase/supabase-js'
+import type { Database } from './types'
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
 const supabasePublishableKey =
@@ -23,7 +24,7 @@ const safeSupabasePublishableKey: string = supabasePublishableKey
  * Helper function to create a Supabase client instance.
  */
 export function createClient() {
-  return createSupabaseClient(safeSupabaseUrl, safeSupabasePublishableKey)
+  return createSupabaseClient<Database>(safeSupabaseUrl, safeSupabasePublishableKey)
 }
 
 /**

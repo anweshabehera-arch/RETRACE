@@ -2,39 +2,83 @@
 
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
-import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type { User } from '@supabase/supabase-js'
 import {
-  Activity, ArrowLeft, ArrowRight, Battery, Bell, Check, CheckCircle2, ChevronDown, CircleHelp,
-  Clock3, CloudOff, Compass, Copy, ExternalLink, Eye, EyeOff, FileKey2, Fingerprint, Globe2,
-  HeartHandshake, Laptop, LockKeyhole, LogOut, MapPin, Menu, MoreHorizontal, Navigation,
+  Activity, ArrowLeft, ArrowRight, Battery, Bell, Check, CheckCircle2, CircleHelp,
+  Clock3, CloudOff, ExternalLink, Eye, EyeOff, FileKey2, Fingerprint, Globe2,
+  Laptop, LockKeyhole, LogOut, MapPin, Menu, Navigation, Pencil,
   Phone, Plus, QrCode, Radar, RefreshCw, Search, Send, Settings, Shield, ShieldCheck,
-  Smartphone, Sparkles, Target, UserRound, UsersRound, Wifi, X, Zap
+  Smartphone, Sparkles, Trash2, UserRound, UsersRound, Wifi, X, Zap
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase/client'
-import { signIn, signUp, signOut } from '@/lib/supabase/auth'
+import { sendPasswordReset, signIn, signOut, signUp } from '@/lib/supabase/auth'
+import { getUserProfile, maskPhoneNumber, type PublicProfile } from '@/lib/supabase/profile'
+import {
+  createDevice,
+  createRecoveryRequestServer,
+  createTrustedContact,
+  deleteDevice,
+  deleteTrustedContact,
+  formatShortDate,
+  formatTimestamp,
+  getActivityLogs,
+  getDevices,
+  getEffectiveDeviceStatus,
+  getRecoveryOverview,
+  getRecoveryRequests,
+  getTrustedContacts,
+  resolveRecoveryRequestServer,
+  saveRecoveryPinServer,
+  updateDeviceLocation,
+  updateDeviceStatus,
+  updateProfileDetails,
+  updateTrustedContact,
+  verifyRecoveryPinServer,
+} from '@/lib/supabase/data'
+import type { ActivityLog, Device, RecoveryRequest, TrustedContact } from '@/lib/supabase/types'
 
-const blue = '#1463ff'
 const nav = [
-  ['Overview','/dashboard',Activity], ['My Devices','/devices',Smartphone], ['Recover Device','/recovery',Radar],
-  ['Trusted Circle','/trusted-circle',UsersRound], ['Emergency Passport','/emergency-passport',FileKey2], ['Activity Timeline','/activity',Clock3], ['Settings','/settings',Settings],
+  ['Overview', '/dashboard', Activity],
+  ['My Devices', '/devices', Smartphone],
+  ['Recover Device', '/recovery', Radar],
+  ['Trusted Circle', '/trusted-circle', UsersRound],
+  ['Emergency Passport', '/emergency-passport', FileKey2],
+  ['Activity Timeline', '/activity', Clock3],
+  ['Settings', '/settings', Settings],
 ] as const
-
-const contacts = [
-  { name: 'Maya Patel', relation: 'Sister', phone: '+1 (415) ••• ••82', approved: true, initials: 'MP' },
-  { name: 'Rohan Mehta', relation: 'Friend', phone: '+1 (650) ••• ••41', approved: true, initials: 'RM' },
-  { name: 'Nisha Kapoor', relation: 'Parent', phone: '+1 (408) ••• ••19', approved: false, initials: 'NK' },
-]
 
 interface AuthContextType {
   user: User | null
+  profile: PublicProfile | null
+  devices: Device[]
+  contacts: TrustedContact[]
+  recoveryRequests: RecoveryRequest[]
+  activityLogs: ActivityLog[]
   loading: boolean
+  profileLoading: boolean
+  dataLoading: boolean
+  profileError: string | null
+  dataError: string | null
+  refreshProfile: () => Promise<void>
+  refreshData: () => Promise<void>
   signOut: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextType>({
   user: null,
+  profile: null,
+  devices: [],
+  contacts: [],
+  recoveryRequests: [],
+  activityLogs: [],
   loading: true,
+  profileLoading: false,
+  dataLoading: false,
+  profileError: null,
+  dataError: null,
+  refreshProfile: async () => {},
+  refreshData: async () => {},
   signOut: async () => {},
 })
 
@@ -53,13 +97,13 @@ function Brand({ dark = false }: { dark?: boolean }) {
   )
 }
 
-function Button({ children, variant='primary', href, onClick, className='', disabled=false, type='button' }: any) {
+function Button({ children, variant = 'primary', href, onClick, className = '', disabled = false, type = 'button' }: any) {
   const cls = `inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition hover:-translate-y-0.5 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:translate-y-0 ${
-    variant==='primary'
+    variant === 'primary'
       ? 'bg-[#1463ff] text-white shadow-[0_10px_24px_rgba(20,99,255,.18)] hover:bg-[#0b54e9]'
-      : variant==='dark'
+      : variant === 'dark'
       ? 'bg-[#0b1b35] text-white hover:bg-[#162a49]'
-      : variant==='danger'
+      : variant === 'danger'
       ? 'bg-[#fff0f0] text-[#c53d47] hover:bg-[#ffe2e2]'
       : 'border border-[#dce5f2] bg-white text-[#27405e] hover:border-[#b9cae0]'
   } ${className}`
@@ -73,6 +117,14 @@ function Button({ children, variant='primary', href, onClick, className='', disa
       {children}
     </button>
   )
+}
+
+function DeviceIcon({ type, className = 'size-7' }: { type: string; className?: string }) {
+  const lower = type.toLowerCase()
+  if (lower.includes('mac') || lower.includes('laptop') || lower.includes('pc') || lower.includes('desktop')) {
+    return <Laptop className={className} />
+  }
+  return <Smartphone className={className} />
 }
 
 function PublicNav() {
@@ -120,18 +172,14 @@ function Landing() {
               <span className="text-[#1463ff]">Your recovery</span> shouldn&apos;t be.
             </h1>
             <p className="mt-7 max-w-xl text-lg leading-8 text-[#637790]">
-              An independent recovery identity that helps you regain control of your lost device without depending on your primary Google or Apple account.
+              An independent recovery identity that helps you organize devices, trusted contacts, and recovery check-ins without depending on your primary Google or Apple account.
             </p>
             <div className="mt-9 flex flex-wrap gap-3">
               <Button href="/register">Create your recovery identity <ArrowRight className="size-4" /></Button>
               <Button href="/recover" variant="outline">Recover my phone</Button>
             </div>
             <div className="mt-8 flex items-center gap-3 text-xs font-medium text-[#7489a3]">
-              <div className="flex -space-x-2">
-                <span className="grid size-7 place-items-center rounded-full border-2 border-[#f8fbff] bg-[#dce8ff] text-[9px] font-bold text-[#3567bc]">AS</span>
-                <span className="grid size-7 place-items-center rounded-full border-2 border-[#f8fbff] bg-[#d9f3e7] text-[9px] font-bold text-[#21835a]">JM</span>
-                <span className="grid size-7 place-items-center rounded-full border-2 border-[#f8fbff] bg-[#ffe6c9] text-[9px] font-bold text-[#a66a1a]">RK</span>
-              </div>
+              <ShieldCheck className="size-4 text-[#1463ff]" />
               <span>Built for the moments that matter.</span>
             </div>
           </div>
@@ -166,13 +214,13 @@ function Landing() {
           </div>
           <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {[
-              ['Independent Recovery Identity',Fingerprint,'A separate, secure way back in.'],
-              ['Trusted Circle Recovery',UsersRound,'Recover with people who know you.'],
-              ['Last Known Location',MapPin,'See the last place your device checked in.'],
-              ['Digital Emergency Passport',FileKey2,'Your essential recovery information, organized.'],
-              ['Smart Recovery Assistant',Sparkles,'Clear, rule-based guidance when it matters.'],
-              ['Smart Return QR',QrCode,'Help a finder return your phone safely.']
-            ].map(([title,Icon,desc]: any) => (
+              ['Independent Recovery Identity', Fingerprint, 'A separate, secure way back in.'],
+              ['Trusted Circle Recovery', UsersRound, 'Organize the people who can help you recover.'],
+              ['Permission-Based Check-Ins', MapPin, 'Record your device’s last known location when you choose.'],
+              ['Digital Emergency Passport', FileKey2, 'Your essential recovery information, organized.'],
+              ['Incident Recovery Tracking', Sparkles, 'Track lost-device incidents and recovery status.'],
+              ['Server-Hashed Security PIN', QrCode, 'Protect sensitive actions with a server-hashed PIN.']
+            ].map(([title, Icon, desc]: any) => (
               <div key={title} className="rounded-2xl border border-[#e1eaf5] bg-white p-6 shadow-[0_8px_30px_rgba(36,70,110,.04)]">
                 <div className="grid size-11 place-items-center rounded-xl bg-[#edf4ff] text-[#1463ff]">
                   <Icon className="size-5" />
@@ -194,10 +242,10 @@ function Landing() {
               </div>
               <div className="grid gap-4 sm:grid-cols-3">
                 {[
-                  ['01','Register','Create your independent identity.'],
-                  ['02','Protect','Add a device and trusted circle.'],
-                  ['03','Recover','Verify, locate and return.']
-                ].map(([n,t,d]) => (
+                  ['01', 'Register', 'Create your independent identity.'],
+                  ['02', 'Protect', 'Add a device and trusted circle.'],
+                  ['03', 'Recover', 'Track incidents, verify PIN, and recover.']
+                ].map(([n, t, d]) => (
                   <div key={n} className="rounded-2xl border border-white/10 bg-white/5 p-5">
                     <span className="text-sm text-[#78a9ff]">{n}</span>
                     <h3 className="mt-10 font-semibold">{t}</h3>
@@ -217,7 +265,7 @@ function Landing() {
               </div>
               <h2 className="mt-4 text-3xl font-semibold tracking-tight">Your recovery belongs to you.</h2>
               <p className="mt-4 leading-7 text-[#637790]">
-                Permission-based location collection, masked contact details and clear recovery controls. Independent recovery identity secured through Supabase Auth.
+                Permission-based location check-ins, masked contact details, PostgreSQL Row Level Security, and server-side PIN hashing via Supabase.
               </p>
             </div>
             <Button href="/register">Prepare your safety net <ArrowRight className="size-4" /></Button>
@@ -231,7 +279,7 @@ function Landing() {
             <div className="flex gap-5">
               <a href="#security">Privacy</a>
               <a href="#security">Terms</a>
-              <a href="mailto:hello@retrace.demo">Contact</a>
+              <Link href="/login">Sign in</Link>
             </div>
           </div>
         </section>
@@ -253,11 +301,11 @@ function HeroVisual() {
       </div>
       <div className="absolute bottom-8 left-6 z-10 w-56 rounded-2xl border border-white bg-white p-4 shadow-xl">
         <div className="flex items-center justify-between">
-          <span className="text-xs font-semibold text-[#637790]">Last known location</span>
+          <span className="text-xs font-semibold text-[#637790]">Location check-in</span>
           <MapPin className="size-4 text-[#e24d59]" />
         </div>
-        <p className="mt-3 text-sm font-semibold">Mission District, SF</p>
-        <p className="mt-1 text-xs text-[#8192a8]">Updated 12 minutes ago</p>
+        <p className="mt-3 text-sm font-semibold">Permission-based</p>
+        <p className="mt-1 text-xs text-[#8192a8]">Stored only on check-in</p>
         <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-[#e9eef6]">
           <div className="h-full w-3/4 rounded-full bg-[#1463ff]" />
         </div>
@@ -276,7 +324,7 @@ function HeroVisual() {
           </span>
         </div>
         <div className="absolute bottom-8 right-8 rounded-xl bg-white/90 px-3 py-2 text-xs font-semibold text-[#27405e] shadow">
-          <span className="mr-1.5 inline-block size-1.5 rounded-full bg-[#37b979]" /> Demo location
+          <span className="mr-1.5 inline-block size-1.5 rounded-full bg-[#37b979]" /> RLS Secured
         </div>
       </div>
       <div className="absolute bottom-10 right-12 h-48 w-24 rotate-[-8deg] rounded-[22px] border-[5px] border-[#172b48] bg-[#f4f8ff] shadow-2xl">
@@ -295,19 +343,65 @@ function AppShell({ children, title, description }: { children: React.ReactNode;
   const pathname = usePathname()
   const router = useRouter()
   const [mobile, setMobile] = useState(false)
-  const { user, signOut } = useAuth()
+  const [searchQuery, setSearchQuery] = useState('')
+  const [notifOpen, setNotifOpen] = useState(false)
+  const {
+    user,
+    profile,
+    devices,
+    contacts,
+    recoveryRequests,
+    activityLogs,
+    profileError,
+    dataError,
+    profileLoading,
+    dataLoading,
+    refreshProfile,
+    refreshData,
+    signOut,
+  } = useAuth()
+
+  const activeDeviceIds = useMemo(
+    () => new Set(recoveryRequests.filter((r) => r.status === 'active').map((r) => r.device_id)),
+    [recoveryRequests]
+  )
 
   const userInitials = useMemo(() => {
-    const fullName = user?.user_metadata?.full_name
+    const fullName = profile?.full_name || user?.user_metadata?.full_name
     if (fullName && typeof fullName === 'string') {
       const parts = fullName.trim().split(/\s+/).filter(Boolean)
       if (parts.length >= 2) {
         return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
       }
-      return parts[0].slice(0, 2).toUpperCase()
+      if (parts.length === 1) {
+        return parts[0].slice(0, 2).toUpperCase()
+      }
     }
-    return user?.email ? user.email.slice(0, 2).toUpperCase() : 'AS'
-  }, [user])
+    return user?.email ? user.email.slice(0, 2).toUpperCase() : 'U'
+  }, [profile, user])
+
+  const searchResults = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    if (!q) return []
+    const items: { label: string; sub: string; href: string }[] = []
+    for (const d of devices) {
+      if (d.name.toLowerCase().includes(q) || d.type.toLowerCase().includes(q) || d.last_location_name.toLowerCase().includes(q)) {
+        const effStatus = getEffectiveDeviceStatus(d, activeDeviceIds)
+        items.push({ label: d.name, sub: `Device · ${effStatus}`, href: '/devices' })
+      }
+    }
+    for (const c of contacts) {
+      if (c.name.toLowerCase().includes(q) || c.relation.toLowerCase().includes(q)) {
+        items.push({ label: c.name, sub: `Trusted Contact · ${c.relation}`, href: '/trusted-circle' })
+      }
+    }
+    for (const a of activityLogs) {
+      if (a.title.toLowerCase().includes(q) || a.description.toLowerCase().includes(q)) {
+        items.push({ label: a.title, sub: `Activity · ${a.category}`, href: '/activity' })
+      }
+    }
+    return items.slice(0, 6)
+  }, [searchQuery, devices, contacts, activityLogs])
 
   const handleSignOut = async () => {
     try {
@@ -319,12 +413,14 @@ function AppShell({ children, title, description }: { children: React.ReactNode;
     }
   }
 
+  const combinedError = profileError || dataError
+
   return (
     <div className="min-h-screen bg-[#f7faff] text-[#0b1b35]">
       <aside className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-[#e2eaf4] bg-white px-4 py-5 transition-transform lg:translate-x-0 ${mobile ? 'translate-x-0' : '-translate-x-full'}`}>
         <div className="flex items-center justify-between px-2">
           <Brand />
-          <button className="lg:hidden" onClick={() => setMobile(false)}>
+          <button className="lg:hidden" onClick={() => setMobile(false)} aria-label="Close navigation">
             <X className="size-5" />
           </button>
         </div>
@@ -362,27 +458,106 @@ function AppShell({ children, title, description }: { children: React.ReactNode;
 
       <div className="lg:pl-64">
         <header className="sticky top-0 z-30 flex h-[76px] items-center justify-between border-b border-[#e5edf6] bg-white/90 px-5 backdrop-blur lg:px-10">
-          <button className="rounded-lg p-2 lg:hidden" onClick={() => setMobile(true)}>
+          <button className="rounded-lg p-2 lg:hidden" onClick={() => setMobile(true)} aria-label="Open navigation">
             <Menu className="size-5" />
           </button>
           <div className="hidden lg:block">
             <p className="text-sm font-semibold">{title}</p>
             {description && <p className="mt-0.5 text-xs text-[#8192a8]">{description}</p>}
           </div>
-          <div className="flex items-center gap-3">
-            <div className="hidden items-center gap-2 rounded-xl border border-[#e1e9f3] px-3 py-2 text-xs text-[#9aaabd] sm:flex">
-              <Search className="size-4" /> Search
+          <div className="relative flex items-center gap-3">
+            <div className="relative hidden sm:block">
+              <div className="flex items-center gap-2 rounded-xl border border-[#e1e9f3] bg-white px-3 py-2 text-xs text-[#27405e]">
+                <Search className="size-4 text-[#9aaabd]" />
+                <input
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search devices, contacts..."
+                  className="w-40 bg-transparent text-xs outline-none placeholder:text-[#9aaabd]"
+                />
+                {searchQuery && (
+                  <button onClick={() => setSearchQuery('')} className="text-[#9aaabd] hover:text-[#27405e]">
+                    <X className="size-3.5" />
+                  </button>
+                )}
+              </div>
+              {searchQuery.trim() && (
+                <div className="absolute right-0 top-11 z-50 w-72 rounded-2xl border border-[#e1e9f3] bg-white p-2 shadow-xl">
+                  {searchResults.length === 0 ? (
+                    <p className="p-3 text-xs text-[#8192a8]">No matching devices, contacts, or activity.</p>
+                  ) : (
+                    searchResults.map((item, idx) => (
+                      <Link
+                        key={`${item.href}-${idx}`}
+                        href={item.href}
+                        onClick={() => setSearchQuery('')}
+                        className="block rounded-xl px-3 py-2 hover:bg-[#f4f8ff]"
+                      >
+                        <p className="text-xs font-semibold text-[#0b1b35]">{item.label}</p>
+                        <p className="text-[11px] text-[#8192a8]">{item.sub}</p>
+                      </Link>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
-            <button className="relative rounded-xl p-2.5 text-[#71839a] hover:bg-[#f4f7fb]">
-              <Bell className="size-[18px]" />
-              <span className="absolute right-2 top-2 size-1.5 rounded-full bg-[#e24d59]" />
-            </button>
+
+            <div className="relative">
+              <button
+                onClick={() => setNotifOpen((v) => !v)}
+                className="relative rounded-xl p-2.5 text-[#71839a] hover:bg-[#f4f7fb]"
+                aria-label="Recent activity notifications"
+              >
+                <Bell className="size-[18px]" />
+                {activityLogs.length > 0 && <span className="absolute right-2 top-2 size-1.5 rounded-full bg-[#1463ff]" />}
+              </button>
+              {notifOpen && (
+                <div className="absolute right-0 top-12 z-50 w-80 rounded-2xl border border-[#e1e9f3] bg-white p-4 shadow-xl">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-semibold text-[#0b1b35]">Recent events</p>
+                    <Link href="/activity" onClick={() => setNotifOpen(false)} className="text-xs font-semibold text-[#1463ff]">
+                      View all
+                    </Link>
+                  </div>
+                  <div className="mt-3 flex flex-col gap-3">
+                    {activityLogs.slice(0, 4).length === 0 ? (
+                      <p className="text-xs text-[#8192a8]">No activity recorded yet.</p>
+                    ) : (
+                      activityLogs.slice(0, 4).map((log) => (
+                        <div key={log.id} className="border-t border-[#f1f5fa] pt-2 first:border-t-0 first:pt-0">
+                          <p className="text-xs font-medium text-[#0b1b35]">{log.title}</p>
+                          <p className="mt-0.5 text-[11px] text-[#8192a8]">{formatTimestamp(log.created_at)}</p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="grid size-9 place-items-center rounded-full bg-[#dce8ff] text-xs font-bold text-[#3567bc]">
               {userInitials}
             </div>
           </div>
         </header>
+
         <main className="mx-auto max-w-[1480px] px-5 py-8 lg:px-10">
+          {combinedError && (
+            <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#fcdada] bg-[#fff5f5] px-4 py-3 text-sm text-[#c53030]">
+              <span>Unable to load account data: {combinedError}</span>
+              <button
+                onClick={() => {
+                  refreshProfile()
+                  refreshData()
+                }}
+                disabled={profileLoading || dataLoading}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-[#c53030] shadow-xs transition hover:bg-[#fff0f0] disabled:opacity-60"
+              >
+                <RefreshCw className={`size-3.5 ${profileLoading || dataLoading ? 'animate-spin' : ''}`} />
+                {profileLoading || dataLoading ? 'Retrying...' : 'Retry'}
+              </button>
+            </div>
+          )}
           {children}
         </main>
       </div>
@@ -396,7 +571,13 @@ function Stat({ label, value, icon: Icon, tone = 'blue' }: any) {
       <div className="flex items-center justify-between">
         <span className="text-sm text-[#71839a]">{label}</span>
         <span className={`grid size-9 place-items-center rounded-xl ${
-          tone === 'green' ? 'bg-[#eaf8f0] text-[#2b9d69]' : tone === 'orange' ? 'bg-[#fff5e7] text-[#db8a2d]' : 'bg-[#edf4ff] text-[#1463ff]'
+          tone === 'green'
+            ? 'bg-[#eaf8f0] text-[#2b9d69]'
+            : tone === 'orange'
+            ? 'bg-[#fff5e7] text-[#db8a2d]'
+            : tone === 'red'
+            ? 'bg-[#fff0f0] text-[#c53d47]'
+            : 'bg-[#edf4ff] text-[#1463ff]'
         }`}>
           <Icon className="size-[18px]" />
         </span>
@@ -407,88 +588,217 @@ function Stat({ label, value, icon: Icon, tone = 'blue' }: any) {
 }
 
 function Dashboard() {
-  const [lost, setLost] = useState(false)
-  const { user } = useAuth()
+  const { user, profile, devices, contacts, recoveryRequests, activityLogs, profileLoading, dataLoading, refreshData } = useAuth()
+  const [actionBusy, setActionBusy] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const displayName = useMemo(() => {
-    return user?.user_metadata?.full_name || (user?.email ? user.email.split('@')[0] : 'Anwesha')
-  }, [user])
+    return profile?.full_name || user?.user_metadata?.full_name || (user?.email ? user.email.split('@')[0] : 'User')
+  }, [profile, user])
+
+  const formattedDate = useMemo(() => {
+    return new Intl.DateTimeFormat('en-US', {
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+    }).format(new Date())
+  }, [])
+
+  const { activeRequests, activeDeviceIds, lostDevices, protectedCount, recoveryStatus } = useMemo(
+    () => getRecoveryOverview(devices, recoveryRequests),
+    [devices, recoveryRequests]
+  )
+
+  const primaryDevice = useMemo(() => {
+    return lostDevices[0] || devices[0] || null
+  }, [lostDevices, devices])
+
+  const primaryEffectiveStatus = useMemo(
+    () => (primaryDevice ? getEffectiveDeviceStatus(primaryDevice, activeDeviceIds) : null),
+    [primaryDevice, activeDeviceIds]
+  )
+
+  const recoveryStatusLabel = useMemo(() => {
+    if (dataLoading) return '...'
+    return recoveryStatus
+  }, [dataLoading, recoveryStatus])
+
+  const handleTogglePrimaryDeviceLost = async () => {
+    if (!user?.id || !primaryDevice) return
+    setActionError(null)
+    setActionBusy(true)
+    try {
+      if (primaryEffectiveStatus === 'lost') {
+        const activeReq = activeRequests.find((r) => r.device_id === primaryDevice.id)
+        if (activeReq) {
+          await resolveRecoveryRequestServer(activeReq.id, 'cancel')
+        } else {
+          await updateDeviceStatus(user.id, primaryDevice.id, primaryDevice.name, 'protected')
+        }
+      } else {
+        await createRecoveryRequestServer(primaryDevice.id, 'Marked as lost from overview')
+      }
+      await refreshData()
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : 'Unable to update device status.')
+    } finally {
+      setActionBusy(false)
+    }
+  }
 
   return (
     <AppShell title="Overview" description="Your recovery command center">
       <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
         <div>
-          <p className="text-sm text-[#71839a]">Tuesday, November 10, 2026</p>
+          <p className="text-sm text-[#71839a]">{formattedDate}</p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight">Welcome back, {displayName}.</h1>
-          <p className="mt-2 text-sm text-[#71839a]">Your recovery identity is active and ready.</p>
+          <p className="mt-2 text-sm text-[#71839a]">
+            {profileLoading
+              ? 'Loading your recovery identity...'
+              : profile?.recovery_id
+              ? `Recovery ID: ${profile.recovery_id} · Your recovery identity is active and ready.`
+              : 'Your recovery identity is active and ready.'}
+          </p>
         </div>
         <Button href="/recovery"><Radar className="size-4" /> Start recovery</Button>
       </div>
 
+      {actionError && (
+        <div className="mt-5 rounded-xl border border-[#fcdada] bg-[#fff5f5] p-3.5 text-xs font-medium text-[#c53030]">
+          {actionError}
+        </div>
+      )}
+
       <div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <Stat label="Registered devices" value="2" icon={Smartphone} />
-        <Stat label="Protected devices" value="2" icon={ShieldCheck} tone="green" />
-        <Stat label="Trusted contacts" value="3" icon={UsersRound} />
-        <Stat label="Recovery status" value="Active" icon={Zap} tone="green" />
+        <Stat label="Registered devices" value={dataLoading ? '—' : String(devices.length)} icon={Smartphone} />
+        <Stat label="Protected devices" value={dataLoading ? '—' : String(protectedCount)} icon={ShieldCheck} tone="green" />
+        <Stat label="Trusted contacts" value={dataLoading ? '—' : String(contacts.length)} icon={UsersRound} />
+        <Stat
+          label="Recovery status"
+          value={recoveryStatusLabel}
+          icon={Zap}
+          tone={activeRequests.length > 0 || lostDevices.length > 0 ? 'orange' : 'green'}
+        />
       </div>
 
       <div className="mt-6 grid gap-6 xl:grid-cols-[1.35fr_.65fr]">
         <section className="rounded-2xl border border-[#e2eaf4] bg-white p-6">
-          <div className="flex items-start justify-between">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className={`size-2 rounded-full ${lost ? 'bg-[#e24d59]' : 'bg-[#37b979]'}`} />
-                <span className="text-sm font-semibold">{lost ? 'Marked as lost' : 'Protected device'}</span>
+          {dataLoading ? (
+            <div className="py-10 text-center text-sm text-[#8192a8]">Loading your devices...</div>
+          ) : !primaryDevice ? (
+            <div className="flex flex-col items-start justify-between gap-4 py-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="size-2 rounded-full bg-[#9aaabd]" />
+                  <span className="text-sm font-semibold text-[#60738c]">No devices registered yet</span>
+                </div>
+                <h2 className="mt-2 text-xl font-semibold">Protect your first device</h2>
+                <p className="mt-1 text-sm text-[#71839a]">
+                  Register a phone, laptop, or tablet to track check-in locations and open recovery requests if it goes missing.
+                </p>
               </div>
-              <h2 className="mt-2 text-xl font-semibold">{displayName}&apos;s iPhone 15 Pro</h2>
-              <p className="mt-1 text-sm text-[#71839a]">iPhone · Registered October 24, 2026</p>
+              <Button href="/devices"><Plus className="size-4" /> Register a device</Button>
             </div>
-            <button className="rounded-lg p-1 text-[#9aaabd]">
-              <MoreHorizontal className="size-5" />
-            </button>
-          </div>
-          <div className="mt-7 grid gap-4 sm:grid-cols-3">
-            <div className="rounded-xl bg-[#f6f9fd] p-4">
-              <p className="text-xs text-[#8192a8]">Last active</p>
-              <p className="mt-2 text-sm font-semibold">12 min ago</p>
-            </div>
-            <div className="rounded-xl bg-[#f6f9fd] p-4">
-              <p className="text-xs text-[#8192a8]">Battery</p>
-              <p className="mt-2 flex items-center gap-1.5 text-sm font-semibold">
-                <Battery className="size-4 text-[#db8a2d]" /> 18%
-              </p>
-            </div>
-            <div className="rounded-xl bg-[#f6f9fd] p-4">
-              <p className="text-xs text-[#8192a8]">Connection</p>
-              <p className="mt-2 flex items-center gap-1.5 text-sm font-semibold">
-                <Wifi className="size-4 text-[#37a673]" /> Online
-              </p>
-            </div>
-          </div>
-          <div className="mt-5 flex flex-wrap gap-3">
-            <Button href="/recovery"><Navigation className="size-4" /> View recovery</Button>
-            <Button variant={lost ? 'outline' : 'danger'} onClick={() => setLost(!lost)}>
-              {lost ? 'Restore protected status' : 'Mark as lost'}
-            </Button>
-          </div>
+          ) : (
+            <>
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className={`size-2 rounded-full ${
+                      primaryEffectiveStatus === 'lost' ? 'bg-[#e24d59]' : 'bg-[#37b979]'
+                    }`} />
+                    <span className="text-sm font-semibold">
+                      {primaryEffectiveStatus === 'lost' ? 'Marked as lost' : 'Protected device'}
+                    </span>
+                  </div>
+                  <h2 className="mt-2 text-xl font-semibold">{primaryDevice.name}</h2>
+                  <p className="mt-1 text-sm text-[#71839a]">
+                    {primaryDevice.type} · Registered {formatShortDate(primaryDevice.created_at)}
+                  </p>
+                </div>
+                <Link href="/devices" className="rounded-lg p-1.5 text-xs font-semibold text-[#1463ff] hover:bg-[#edf4ff]">
+                  Manage
+                </Link>
+              </div>
+              <div className="mt-7 grid gap-4 sm:grid-cols-3">
+                <div className="rounded-xl bg-[#f6f9fd] p-4">
+                  <p className="text-xs text-[#8192a8]">Last check-in</p>
+                  <p className="mt-2 text-sm font-semibold">{formatTimestamp(primaryDevice.last_seen_at)}</p>
+                </div>
+                <div className="rounded-xl bg-[#f6f9fd] p-4">
+                  <p className="text-xs text-[#8192a8]">Battery</p>
+                  <p className="mt-2 flex items-center gap-1.5 text-sm font-semibold">
+                    <Battery className="size-4 text-[#8192a8]" />
+                    {primaryDevice.battery_level !== null ? `${primaryDevice.battery_level}%` : 'Not reported'}
+                  </p>
+                </div>
+                <div className="rounded-xl bg-[#f6f9fd] p-4">
+                  <p className="text-xs text-[#8192a8]">Connection</p>
+                  <p className="mt-2 flex items-center gap-1.5 text-sm font-semibold">
+                    <Wifi className={`size-4 ${primaryDevice.is_online ? 'text-[#37a673]' : 'text-[#8192a8]'}`} />
+                    {primaryDevice.is_online ? 'Online' : 'Offline'}
+                  </p>
+                </div>
+              </div>
+              <div className="mt-5 flex flex-wrap gap-3">
+                <Button href="/recovery"><Navigation className="size-4" /> View recovery</Button>
+                <Button
+                  variant={primaryEffectiveStatus === 'lost' ? 'outline' : 'danger'}
+                  onClick={handleTogglePrimaryDeviceLost}
+                  disabled={actionBusy}
+                >
+                  {actionBusy
+                    ? 'Updating...'
+                    : primaryEffectiveStatus === 'lost'
+                    ? 'Restore protected status'
+                    : 'Mark as lost'}
+                </Button>
+              </div>
+            </>
+          )}
         </section>
 
         <section className="rounded-2xl border border-[#e2eaf4] bg-[#0e2341] p-6 text-white">
           <div className="flex items-center gap-2 text-sm font-semibold">
             <Sparkles className="size-4 text-[#78a9ff]" /> Smart recovery guide
           </div>
-          <p className="mt-6 text-lg font-semibold leading-7">Your device was last recorded online 12 minutes ago.</p>
+          <p className="mt-6 text-lg font-semibold leading-7">
+            {activeRequests.length > 0
+              ? `You currently have ${activeRequests.length} active recovery ${activeRequests.length === 1 ? 'request' : 'requests'}.`
+              : devices.length === 0
+              ? 'Your identity is ready. Add a device to begin protection.'
+              : `${protectedCount} of ${devices.length} registered ${devices.length === 1 ? 'device is' : 'devices are'} protected.`}
+          </p>
           <p className="mt-3 text-sm leading-6 text-[#aebdd2]">
-            Battery at last update: 18%. Consider acting soon while the device may still be reachable.
+            {profile?.has_recovery_pin
+              ? 'Your Recovery PIN is configured. Keep your location check-ins and trusted circle up to date.'
+              : 'Set up a 4–6 digit Recovery PIN in Settings to strengthen account verification.'}
           </p>
           <div className="mt-6 rounded-xl bg-white/8 p-4">
             <p className="text-xs font-semibold uppercase tracking-wider text-[#78a9ff]">Recommended next</p>
-            <div className="mt-3 flex items-start gap-2 text-sm">
-              <CheckCircle2 className="mt-0.5 size-4 text-[#64d19b]" /> Save the last known location
-            </div>
-            <div className="mt-2 flex items-start gap-2 text-sm">
-              <UsersRound className="mt-0.5 size-4 text-[#64d19b]" /> Notify your trusted circle
-            </div>
+            {devices.length === 0 ? (
+              <Link href="/devices" className="mt-3 flex items-start gap-2 text-sm hover:text-[#78a9ff]">
+                <Smartphone className="mt-0.5 size-4 text-[#64d19b]" /> Register your primary device
+              </Link>
+            ) : (
+              <Link href="/recovery" className="mt-3 flex items-start gap-2 text-sm hover:text-[#78a9ff]">
+                <CheckCircle2 className="mt-0.5 size-4 text-[#64d19b]" /> Record a location check-in
+              </Link>
+            )}
+            {contacts.length === 0 ? (
+              <Link href="/trusted-circle" className="mt-2 flex items-start gap-2 text-sm hover:text-[#78a9ff]">
+                <UsersRound className="mt-0.5 size-4 text-[#64d19b]" /> Add a trusted contact
+              </Link>
+            ) : !profile?.has_recovery_pin ? (
+              <Link href="/settings" className="mt-2 flex items-start gap-2 text-sm hover:text-[#78a9ff]">
+                <LockKeyhole className="mt-0.5 size-4 text-[#64d19b]" /> Configure your Recovery PIN
+              </Link>
+            ) : (
+              <Link href="/emergency-passport" className="mt-2 flex items-start gap-2 text-sm hover:text-[#78a9ff]">
+                <FileKey2 className="mt-0.5 size-4 text-[#64d19b]" /> Review your Emergency Passport
+              </Link>
+            )}
           </div>
         </section>
       </div>
@@ -498,9 +808,17 @@ function Dashboard() {
           <div className="flex items-center justify-between">
             <div>
               <h2 className="font-semibold">Last known location</h2>
-              <p className="mt-1 text-xs text-[#8192a8]">Demo location · Updated 12 minutes ago</p>
+              <p className="mt-1 text-xs text-[#8192a8]">
+                {!primaryDevice
+                  ? 'No registered devices yet'
+                  : primaryDevice.last_location_name === 'Unknown location' && primaryDevice.latitude === null
+                  ? 'Location not recorded yet'
+                  : `Updated ${formatTimestamp(primaryDevice.last_seen_at)}`}
+              </p>
             </div>
-            <Button href="/recovery" variant="outline" className="px-3 py-2 text-xs">View full map</Button>
+            <Button href="/recovery" variant="outline" className="px-3 py-2 text-xs">
+              Check in location
+            </Button>
           </div>
           <div
             className="relative mt-5 h-52 overflow-hidden rounded-xl bg-[#dceaf9]"
@@ -515,17 +833,21 @@ function Dashboard() {
               </span>
             </div>
             <span className="absolute bottom-3 left-3 rounded-lg bg-white/90 px-2.5 py-1.5 text-xs font-semibold text-[#27405e]">
-              Mission District, SF
+              {!primaryDevice
+                ? 'No location recorded'
+                : primaryDevice.last_location_name === 'Unknown location'
+                ? 'Location unavailable'
+                : primaryDevice.last_location_name}
             </span>
           </div>
         </section>
-        <ActivityList />
+        <ActivityList logs={activityLogs} loading={dataLoading} />
       </div>
     </AppShell>
   )
 }
 
-function ActivityList() {
+function ActivityList({ logs, loading }: { logs: ActivityLog[]; loading: boolean }) {
   return (
     <section className="rounded-2xl border border-[#e2eaf4] bg-white p-6">
       <div className="flex items-center justify-between">
@@ -533,155 +855,516 @@ function ActivityList() {
         <Link href="/activity" className="text-xs font-semibold text-[#1463ff]">View all</Link>
       </div>
       <div className="mt-5 flex flex-col gap-5">
-        {[
-          ['Device registered', 'Anwesha’s iPhone 15 Pro', 'Today, 9:42 AM', Smartphone],
-          ['Location updated', 'Mission District, SF', 'Today, 9:30 AM', MapPin],
-          ['Trusted contact added', 'Nisha Kapoor', 'Yesterday, 4:18 PM', UsersRound],
-          ['Security verification completed', 'Recovery identity verified', 'Oct 24, 2026', ShieldCheck]
-        ].map(([a, b, c, Icon]: any) => (
-          <div className="flex gap-3" key={a}>
-            <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-[#edf4ff] text-[#1463ff]">
-              <Icon className="size-4" />
-            </div>
-            <div className="min-w-0">
-              <p className="text-sm font-medium">{a}</p>
-              <p className="mt-0.5 truncate text-xs text-[#8192a8]">{b}</p>
-            </div>
-            <span className="ml-auto whitespace-nowrap text-[10px] text-[#a1afc0]">{c}</span>
-          </div>
-        ))}
+        {loading ? (
+          <p className="text-sm text-[#8192a8]">Loading recent activity...</p>
+        ) : logs.length === 0 ? (
+          <p className="text-sm text-[#8192a8]">No activity recorded yet.</p>
+        ) : (
+          logs.slice(0, 4).map((log) => {
+            const Icon =
+              log.category === 'Device'
+                ? Smartphone
+                : log.category === 'Recovery'
+                ? Radar
+                : ShieldCheck
+            return (
+              <div className="flex gap-3" key={log.id}>
+                <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-[#edf4ff] text-[#1463ff]">
+                  <Icon className="size-4" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">{log.title}</p>
+                  <p className="mt-0.5 truncate text-xs text-[#8192a8]">{log.description}</p>
+                </div>
+                <span className="ml-auto whitespace-nowrap text-[10px] text-[#a1afc0]">
+                  {formatTimestamp(log.created_at)}
+                </span>
+              </div>
+            )
+          })
+        )}
       </div>
     </section>
   )
 }
 
 function Recovery() {
-  const [status, setStatus] = useState('active')
-  const [toast, setToast] = useState('')
-  const act = (msg: string) => {
-    setToast(msg)
-    setTimeout(() => setToast(''), 2400)
+  const { user, devices, recoveryRequests, dataLoading, refreshData } = useAuth()
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('')
+  const [notes, setNotes] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [geoBusy, setGeoBusy] = useState(false)
+  const [manualLocationOpen, setManualLocationOpen] = useState(false)
+  const [manualLocation, setManualLocation] = useState('')
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+
+  useEffect(() => {
+    if (!selectedDeviceId && devices.length > 0) {
+      const lostFirst = devices.find((d) => d.status === 'lost')
+      setSelectedDeviceId((lostFirst || devices[0]).id)
+    }
+  }, [devices, selectedDeviceId])
+
+  const selectedDevice = useMemo(
+    () => devices.find((d) => d.id === selectedDeviceId) || devices[0] || null,
+    [devices, selectedDeviceId]
+  )
+
+  const activeRequest = useMemo(
+    () =>
+      selectedDevice
+        ? recoveryRequests.find((r) => r.device_id === selectedDevice.id && r.status === 'active') || null
+        : null,
+    [recoveryRequests, selectedDevice]
+  )
+
+  const handleStartRecovery = async () => {
+    if (!selectedDevice) return
+    setFeedback(null)
+    setBusy(true)
+    try {
+      await createRecoveryRequestServer(selectedDevice.id, notes.trim() || undefined)
+      setNotes('')
+      await refreshData()
+      setFeedback({ type: 'success', text: `Recovery incident created and ${selectedDevice.name} marked as lost.` })
+    } catch (err: unknown) {
+      setFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Unable to start recovery request.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleResolveRequest = async (requestId: string, action: 'recover' | 'cancel') => {
+    setFeedback(null)
+    setBusy(true)
+    try {
+      await resolveRecoveryRequestServer(requestId, action)
+      await refreshData()
+      setFeedback({
+        type: 'success',
+        text: action === 'recover' ? 'Device marked as recovered and incident closed.' : 'Recovery request cancelled.',
+      })
+    } catch (err: unknown) {
+      setFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Unable to update recovery request.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleBrowserGeolocationCheckIn = () => {
+    if (!user?.id || !selectedDevice) return
+    setFeedback(null)
+
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      setManualLocationOpen(true)
+      setFeedback({
+        type: 'error',
+        text: 'Browser geolocation is not supported on this device. Enter a manual location below.',
+      })
+      return
+    }
+
+    setGeoBusy(true)
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const lat = Number(pos.coords.latitude.toFixed(5))
+          const lng = Number(pos.coords.longitude.toFixed(5))
+          const label = `Checked in (${lat}, ${lng})`
+          await updateDeviceLocation(user.id, selectedDevice.id, selectedDevice.name, {
+            locationName: label,
+            latitude: lat,
+            longitude: lng,
+          })
+          await refreshData()
+          setFeedback({ type: 'success', text: `Location check-in saved for ${selectedDevice.name}.` })
+        } catch (err: unknown) {
+          setFeedback({
+            type: 'error',
+            text: err instanceof Error ? err.message : 'Unable to save geolocation check-in.',
+          })
+        } finally {
+          setGeoBusy(false)
+        }
+      },
+      (geoErr) => {
+        setGeoBusy(false)
+        setManualLocationOpen(true)
+        const reason =
+          geoErr.code === geoErr.PERMISSION_DENIED
+            ? 'Location permission was denied. You can enter a manual location instead.'
+            : 'Unable to determine your location automatically. Enter a manual location instead.'
+        setFeedback({ type: 'error', text: reason })
+      },
+      { enableHighAccuracy: false, timeout: 10000, maximumAge: 0 }
+    )
+  }
+
+  const handleManualLocationSave = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!user?.id || !selectedDevice) return
+    setFeedback(null)
+    setGeoBusy(true)
+    try {
+      await updateDeviceLocation(user.id, selectedDevice.id, selectedDevice.name, {
+        locationName: manualLocation,
+        latitude: null,
+        longitude: null,
+      })
+      setManualLocation('')
+      setManualLocationOpen(false)
+      await refreshData()
+      setFeedback({ type: 'success', text: 'Manual location check-in saved.' })
+    } catch (err: unknown) {
+      setFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Unable to save manual location.' })
+    } finally {
+      setGeoBusy(false)
+    }
   }
 
   return (
     <AppShell title="Recover device" description="Take the next right step">
       <div className="max-w-5xl">
-        <div className="flex items-end justify-between">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <p className="text-sm font-semibold text-[#1463ff]">Recovery center</p>
             <h1 className="mt-2 text-3xl font-semibold tracking-tight">Let&apos;s bring your device back.</h1>
-            <p className="mt-2 text-sm text-[#71839a]">All actions below are simulated for this prototype.</p>
+            <p className="mt-2 text-sm text-[#71839a]">
+              Create and manage real recovery incidents backed by your Supabase database.
+            </p>
           </div>
           <Button href="/dashboard" variant="outline"><ArrowLeft className="size-4" /> Back to overview</Button>
         </div>
 
-        <div className="mt-8 grid gap-6 lg:grid-cols-[1.05fr_.95fr]">
-          <section className="rounded-2xl border border-[#e2eaf4] bg-white p-6">
-            <div className="flex items-center gap-4">
-              <div className="grid size-16 place-items-center rounded-2xl bg-[#edf4ff] text-[#1463ff]">
-                <Smartphone className="size-8" />
-              </div>
-              <div>
-                <div className="flex items-center gap-2 text-xs font-semibold text-[#e24d59]">
-                  <span className="size-1.5 rounded-full bg-[#e24d59]" /> {status === 'recovered' ? 'Recovered' : 'Recovery in progress'}
-                </div>
-                <h2 className="mt-1 text-xl font-semibold">Anwesha&apos;s iPhone 15 Pro</h2>
-                <p className="mt-1 text-sm text-[#71839a]">Last seen 12 minutes ago · Battery 18%</p>
-              </div>
-            </div>
+        {feedback && (
+          <div
+            className={`mt-6 rounded-xl border p-3.5 text-xs font-medium ${
+              feedback.type === 'success'
+                ? 'border-[#b9ebd2] bg-[#eaf8f0] text-[#1f8056]'
+                : 'border-[#fcdada] bg-[#fff5f5] text-[#c53030]'
+            }`}
+          >
+            {feedback.text}
+          </div>
+        )}
 
-            {status === 'recovered' ? (
-              <div className="mt-8 rounded-xl bg-[#eaf8f0] p-6 text-center">
-                <div className="mx-auto grid size-14 place-items-center rounded-full bg-[#2b9d69] text-white">
-                  <Check className="size-7" />
-                </div>
-                <h3 className="mt-4 text-lg font-semibold text-[#1f8056]">Device marked as recovered</h3>
-                <p className="mt-2 text-sm text-[#4b8a6d]">Your recovery timeline has been updated.</p>
-              </div>
-            ) : (
-              <>
-                <div className="mt-8">
-                  <div className="flex justify-between text-xs font-semibold">
-                    <span>Recovery progress</span>
-                    <span className="text-[#1463ff]">2 of 4 steps</span>
-                  </div>
-                  <div className="mt-3 flex gap-1.5">
-                    {[1, 2, 3, 4].map((i) => (
-                      <div key={i} className={`h-2 flex-1 rounded-full ${i <= 2 ? 'bg-[#1463ff]' : 'bg-[#e8eef7]'}`} />
-                    ))}
-                  </div>
-                </div>
-
-                <div className="mt-8 grid gap-3 sm:grid-cols-2">
-                  {[
-                    ['Ring device', 'Play a simulated sound on your phone.', Zap],
-                    ['Mark as lost', 'Secure your recovery status.', Shield],
-                    ['Notify trusted circle', 'Send a simulated recovery request.', Send],
-                    ['View location', 'Open the demo last known location.', MapPin]
-                  ].map(([t, d, Icon]: any) => (
-                    <button
-                      key={t}
-                      onClick={() => act(`${t} action simulated`)}
-                      className="flex items-start gap-3 rounded-xl border border-[#e1e9f3] p-4 text-left transition hover:border-[#b8cbea] hover:bg-[#fbfdff]"
+        {dataLoading ? (
+          <div className="mt-8 rounded-2xl border border-[#e2eaf4] bg-white p-8 text-center text-sm text-[#8192a8]">
+            Loading devices and recovery history...
+          </div>
+        ) : devices.length === 0 ? (
+          <div className="mt-8 rounded-2xl border border-[#e2eaf4] bg-white p-8">
+            <h2 className="text-lg font-semibold">No devices registered yet</h2>
+            <p className="mt-2 text-sm text-[#71839a]">
+              You need at least one registered device before opening a recovery request.
+            </p>
+            <Button href="/devices" className="mt-5"><Plus className="size-4" /> Register a device</Button>
+          </div>
+        ) : (
+          <div className="mt-8 grid gap-6 lg:grid-cols-[1.05fr_.95fr]">
+            <section className="rounded-2xl border border-[#e2eaf4] bg-white p-6">
+              {devices.length > 1 && (
+                <div className="mb-6">
+                  <label className="text-xs font-semibold uppercase tracking-wider text-[#71839a]">
+                    Select device
+                    <select
+                      value={selectedDevice?.id ?? ''}
+                      onChange={(e) => setSelectedDeviceId(e.target.value)}
+                      className="mt-2 w-full rounded-xl border border-[#dce5f2] bg-white px-3 py-2.5 text-sm font-medium outline-none focus:border-[#1463ff]"
                     >
-                      <span className="grid size-9 place-items-center rounded-lg bg-[#edf4ff] text-[#1463ff]">
-                        <Icon className="size-4" />
-                      </span>
-                      <span>
-                        <span className="block text-sm font-semibold">{t}</span>
-                        <span className="mt-1 block text-xs leading-5 text-[#8192a8]">{d}</span>
-                      </span>
-                    </button>
-                  ))}
+                      {devices.map((d) => {
+                        const effStatus = getEffectiveDeviceStatus(
+                          d,
+                          new Set(recoveryRequests.filter((r) => r.status === 'active').map((r) => r.device_id))
+                        )
+                        return (
+                          <option key={d.id} value={d.id}>
+                            {d.name} ({effStatus})
+                          </option>
+                        )
+                      })}
+                    </select>
+                  </label>
                 </div>
+              )}
 
-                <Button variant="dark" className="mt-6 w-full" onClick={() => setStatus('recovered')}>
-                  <CheckCircle2 className="size-4" /> Mark as recovered
-                </Button>
-              </>
-            )}
-          </section>
+              {selectedDevice && (
+                <>
+                  <div className="flex items-center gap-4">
+                    <div className="grid size-16 place-items-center rounded-2xl bg-[#edf4ff] text-[#1463ff]">
+                      <DeviceIcon type={selectedDevice.type} className="size-8" />
+                    </div>
+                    <div>
+                      <div className={`flex items-center gap-2 text-xs font-semibold ${
+                        activeRequest || selectedDevice.status === 'lost' ? 'text-[#e24d59]' : 'text-[#2b9d69]'
+                      }`}>
+                        <span className={`size-1.5 rounded-full ${
+                          activeRequest || selectedDevice.status === 'lost' ? 'bg-[#e24d59]' : 'bg-[#37b979]'
+                        }`} />
+                        {activeRequest
+                          ? 'Active recovery request'
+                          : selectedDevice.status === 'lost'
+                          ? 'Marked as lost'
+                          : 'Protected'}
+                      </div>
+                      <h2 className="mt-1 text-xl font-semibold">{selectedDevice.name}</h2>
+                      <p className="mt-1 text-sm text-[#71839a]">
+                        Last check-in: {formatTimestamp(selectedDevice.last_seen_at)}
+                      </p>
+                    </div>
+                  </div>
 
-          <section className="rounded-2xl border border-[#e2eaf4] bg-white p-6">
-            <div className="flex items-center gap-2">
-              <MapPin className="size-4 text-[#e24d59]" />
-              <h2 className="font-semibold">Last recorded location</h2>
-            </div>
-            <div
-              className="mt-5 h-64 rounded-xl bg-[#dceaf9]"
-              style={{
-                backgroundImage:
-                  'linear-gradient(34deg, transparent 45%, #b7cce4 46%, #b7cce4 48%, transparent 49%), linear-gradient(110deg, transparent 44%, #c5d8ed 45%, #c5d8ed 47%, transparent 48%)'
-              }}
-            >
-              <div className="flex h-full items-center justify-center">
-                <div className="grid size-16 place-items-center rounded-full bg-[#1463ff]/15">
-                  <span className="grid size-9 place-items-center rounded-full bg-[#1463ff] text-white">
-                    <MapPin className="size-5" />
-                  </span>
+                  {activeRequest ? (
+                    <div className="mt-6">
+                      <div className="rounded-xl bg-[#f7faff] p-4 text-sm text-[#27405e]">
+                        <p className="font-semibold">Incident opened {formatTimestamp(activeRequest.created_at)}</p>
+                        <p className="mt-1 text-xs text-[#71839a]">
+                          Trusted circle approvals recorded: {activeRequest.approvals_received} of {activeRequest.approvals_required}
+                        </p>
+                        {activeRequest.notes && (
+                          <p className="mt-2 text-xs text-[#60738c]">Note: {activeRequest.notes}</p>
+                        )}
+                      </div>
+
+                      <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+                        <Button
+                          variant="dark"
+                          className="flex-1"
+                          disabled={busy}
+                          onClick={() => handleResolveRequest(activeRequest.id, 'recover')}
+                        >
+                          <CheckCircle2 className="size-4" /> {busy ? 'Updating...' : 'Mark as recovered'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          className="flex-1"
+                          disabled={busy}
+                          onClick={() => handleResolveRequest(activeRequest.id, 'cancel')}
+                        >
+                          Cancel request
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-6">
+                      <label className="text-sm font-semibold">
+                        Incident notes (optional)
+                        <textarea
+                          rows={3}
+                          value={notes}
+                          onChange={(e) => setNotes(e.target.value)}
+                          placeholder="Where or when you last remember having the device..."
+                          className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-3 text-sm outline-none focus:border-[#1463ff]"
+                        />
+                      </label>
+                      <Button
+                        variant="danger"
+                        className="mt-4 w-full"
+                        disabled={busy}
+                        onClick={handleStartRecovery}
+                      >
+                        <Shield className="size-4" />
+                        {busy ? 'Creating recovery request...' : 'Mark as lost & start recovery request'}
+                      </Button>
+                    </div>
+                  )}
+                </>
+              )}
+            </section>
+
+            <section className="rounded-2xl border border-[#e2eaf4] bg-white p-6">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <MapPin className="size-4 text-[#e24d59]" />
+                  <h2 className="font-semibold">Last recorded location</h2>
+                </div>
+                {selectedDevice && (
+                  <button
+                    onClick={() => setManualLocationOpen((v) => !v)}
+                    className="text-xs font-semibold text-[#1463ff]"
+                  >
+                    {manualLocationOpen ? 'Hide manual entry' : 'Enter manually'}
+                  </button>
+                )}
+              </div>
+
+              <div
+                className="mt-5 h-52 rounded-xl bg-[#dceaf9]"
+                style={{
+                  backgroundImage:
+                    'linear-gradient(34deg, transparent 45%, #b7cce4 46%, #b7cce4 48%, transparent 49%), linear-gradient(110deg, transparent 44%, #c5d8ed 45%, #c5d8ed 47%, transparent 48%)'
+                }}
+              >
+                <div className="flex h-full flex-col items-center justify-center p-4 text-center">
+                  <div className="grid size-14 place-items-center rounded-full bg-[#1463ff]/15">
+                    <span className="grid size-9 place-items-center rounded-full bg-[#1463ff] text-white">
+                      <MapPin className="size-5" />
+                    </span>
+                  </div>
+                  {selectedDevice?.latitude !== null && selectedDevice?.longitude !== null && (
+                    <span className="mt-3 rounded-lg bg-white/90 px-3 py-1 text-xs font-semibold text-[#27405e] shadow-xs">
+                      {selectedDevice?.latitude}, {selectedDevice?.longitude}
+                    </span>
+                  )}
                 </div>
               </div>
-            </div>
-            <p className="mt-4 text-sm font-semibold">Mission District, San Francisco</p>
-            <p className="mt-1 text-xs text-[#8192a8]">Demo data · Tuesday, 9:30 AM</p>
-            <div className="mt-5 rounded-xl bg-[#fff7e9] p-4 text-xs leading-5 text-[#9a6a26]">
-              <strong>Safety note:</strong> Do not approach an unfamiliar location alone. Contact local authorities if theft is suspected.
+
+              <p className="mt-4 text-sm font-semibold">
+                {!selectedDevice || selectedDevice.last_location_name === 'Unknown location'
+                  ? 'Location unavailable — no check-in recorded yet'
+                  : selectedDevice.last_location_name}
+              </p>
+              <p className="mt-1 text-xs text-[#8192a8]">
+                {selectedDevice ? `Last updated: ${formatTimestamp(selectedDevice.last_seen_at)}` : 'Select a device'}
+              </p>
+
+              {selectedDevice && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    disabled={geoBusy}
+                    onClick={handleBrowserGeolocationCheckIn}
+                  >
+                    <Navigation className="size-4" />
+                    {geoBusy ? 'Requesting location...' : 'Check in current location (Browser GPS)'}
+                  </Button>
+                </div>
+              )}
+
+              {manualLocationOpen && selectedDevice && (
+                <form onSubmit={handleManualLocationSave} className="mt-4 flex flex-col gap-2 rounded-xl bg-[#f7faff] p-3">
+                  <label className="text-xs font-semibold text-[#27405e]">
+                    Manual location note
+                    <input
+                      value={manualLocation}
+                      onChange={(e) => setManualLocation(e.target.value)}
+                      placeholder="e.g., Campus library 2nd floor"
+                      className="mt-1.5 w-full rounded-lg border border-[#dce5f2] bg-white px-3 py-2 text-xs outline-none focus:border-[#1463ff]"
+                    />
+                  </label>
+                  <Button type="submit" disabled={geoBusy || !manualLocation.trim()} className="py-2 text-xs">
+                    Save manual location
+                  </Button>
+                </form>
+              )}
+
+              <div className="mt-5 rounded-xl bg-[#fff7e9] p-4 text-xs leading-5 text-[#9a6a26]">
+                <strong>Privacy &amp; Safety:</strong> RETRACE does not run background GPS tracking. Location updates are saved only when you grant browser permission or enter a location manually. Do not approach an unfamiliar location alone.
+              </div>
+            </section>
+          </div>
+        )}
+
+        {recoveryRequests.length > 0 && (
+          <section className="mt-8 rounded-2xl border border-[#e2eaf4] bg-white p-6">
+            <h2 className="font-semibold">Recovery history</h2>
+            <div className="mt-4 flex flex-col gap-3">
+              {recoveryRequests.map((req) => {
+                const dev = devices.find((d) => d.id === req.device_id)
+                return (
+                  <div
+                    key={req.id}
+                    className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#edf2f8] bg-[#f9fbff] px-4 py-3 text-sm"
+                  >
+                    <div>
+                      <p className="font-semibold">{dev?.name ?? 'Registered device'}</p>
+                      <p className="text-xs text-[#8192a8]">
+                        Opened {formatTimestamp(req.created_at)}
+                        {req.notes ? ` · ${req.notes}` : ''}
+                      </p>
+                    </div>
+                    <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold capitalize ${
+                      req.status === 'active'
+                        ? 'bg-[#fff0f0] text-[#c53d47]'
+                        : req.status === 'recovered'
+                        ? 'bg-[#eaf8f0] text-[#2b9d69]'
+                        : 'bg-[#f1f4f8] text-[#71839a]'
+                    }`}>
+                      {req.status}
+                    </span>
+                  </div>
+                )
+              })}
             </div>
           </section>
-        </div>
+        )}
       </div>
-      {toast && (
-        <div className="fixed bottom-5 right-5 rounded-xl bg-[#0b1b35] px-4 py-3 text-sm font-medium text-white shadow-xl">
-          {toast}
-        </div>
-      )}
     </AppShell>
   )
 }
 
 function TrustedCircle() {
-  const [approved, setApproved] = useState(2)
-  const [toast, setToast] = useState('')
+  const { user, contacts, dataLoading, refreshData } = useAuth()
+  const [formOpen, setFormOpen] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [name, setName] = useState('')
+  const [relation, setRelation] = useState('')
+  const [phone, setPhone] = useState('')
+  const [email, setEmail] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+
+  const verifiedCount = useMemo(() => contacts.filter((c) => c.approved).length, [contacts])
+
+  const resetForm = () => {
+    setName('')
+    setRelation('')
+    setPhone('')
+    setEmail('')
+    setEditingId(null)
+    setFormOpen(false)
+  }
+
+  const startEdit = (c: TrustedContact) => {
+    setEditingId(c.id)
+    setName(c.name)
+    setRelation(c.relation)
+    setPhone(c.phone)
+    setEmail(c.email ?? '')
+    setFormOpen(true)
+    setFeedback(null)
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!user?.id) return
+    setFeedback(null)
+    setBusy(true)
+    try {
+      if (editingId) {
+        await updateTrustedContact(user.id, editingId, { name, relation, phone, email })
+        setFeedback({ type: 'success', text: 'Trusted contact updated.' })
+      } else {
+        await createTrustedContact(user.id, { name, relation, phone, email })
+        setFeedback({
+          type: 'success',
+          text: 'Trusted contact saved as pending verification.',
+        })
+      }
+      resetForm()
+      await refreshData()
+    } catch (err: unknown) {
+      setFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Unable to save trusted contact.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleDelete = async (c: TrustedContact) => {
+    if (!user?.id) return
+    setFeedback(null)
+    setBusy(true)
+    try {
+      await deleteTrustedContact(user.id, c.id, c.name)
+      await refreshData()
+      setFeedback({ type: 'success', text: `${c.name} removed from Trusted Circle.` })
+    } catch (err: unknown) {
+      setFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Unable to remove contact.' })
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <AppShell title="Trusted Circle" description="People you trust, ready when needed">
@@ -689,31 +1372,106 @@ function TrustedCircle() {
         <div>
           <p className="text-sm font-semibold text-[#1463ff]">Your safety network</p>
           <h1 className="mt-2 text-3xl font-semibold tracking-tight">Trusted Circle</h1>
-          <p className="mt-2 text-sm text-[#71839a]">Two out of three approvals are required for recovery.</p>
+          <p className="mt-2 text-sm text-[#71839a]">
+            Manage the emergency contacts saved to your recovery identity.
+          </p>
         </div>
         <Button onClick={() => {
-          setToast('Recovery request sent to your circle')
-          setTimeout(() => setToast(''), 2400)
+          if (formOpen) resetForm()
+          else {
+            setEditingId(null)
+            setFormOpen(true)
+          }
         }}>
-          <Send className="size-4" /> Send recovery request
+          <Plus className="size-4" /> {formOpen ? 'Cancel' : 'Add trusted contact'}
         </Button>
       </div>
+
+      {feedback && (
+        <div
+          className={`mt-6 rounded-xl border p-3.5 text-xs font-medium ${
+            feedback.type === 'success'
+              ? 'border-[#b9ebd2] bg-[#eaf8f0] text-[#1f8056]'
+              : 'border-[#fcdada] bg-[#fff5f5] text-[#c53030]'
+          }`}
+        >
+          {feedback.text}
+        </div>
+      )}
+
+      {formOpen && (
+        <form onSubmit={handleSubmit} className="mt-6 rounded-2xl border border-[#dce8f6] bg-white p-6">
+          <h2 className="font-semibold">{editingId ? 'Edit trusted contact' : 'Add trusted contact'}</h2>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <label className="text-sm font-semibold">
+              Full name
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+                placeholder="Contact full name"
+                className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-2.5 text-sm outline-none focus:border-[#1463ff]"
+              />
+            </label>
+            <label className="text-sm font-semibold">
+              Relationship
+              <input
+                value={relation}
+                onChange={(e) => setRelation(e.target.value)}
+                required
+                placeholder="e.g., Sister, Parent, Friend"
+                className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-2.5 text-sm outline-none focus:border-[#1463ff]"
+              />
+            </label>
+            <label className="text-sm font-semibold">
+              Phone number
+              <input
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                required
+                placeholder="+1 415 555 0100"
+                className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-2.5 text-sm outline-none focus:border-[#1463ff]"
+              />
+            </label>
+            <label className="text-sm font-semibold">
+              Email (optional)
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="contact@example.com"
+                className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-2.5 text-sm outline-none focus:border-[#1463ff]"
+              />
+            </label>
+          </div>
+          <div className="mt-5 flex gap-3">
+            <Button type="submit" disabled={busy}>
+              {busy ? 'Saving...' : editingId ? 'Save changes' : 'Save contact'}
+            </Button>
+            <Button variant="outline" onClick={resetForm} disabled={busy}>Cancel</Button>
+          </div>
+        </form>
+      )}
 
       <div className="mt-8 rounded-2xl border border-[#dce8f6] bg-[#eef5ff] p-6">
         <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-center">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-wider text-[#4773b8]">Approval status</p>
-            <p className="mt-2 text-xl font-semibold">{approved >= 2 ? 'Recovery approved' : 'Waiting for approvals'}</p>
+            <p className="text-xs font-semibold uppercase tracking-wider text-[#4773b8]">Verification status</p>
+            <p className="mt-2 text-xl font-semibold">
+              {contacts.length === 0
+                ? 'No trusted contacts added yet'
+                : `${verifiedCount} of ${contacts.length} ${contacts.length === 1 ? 'contact' : 'contacts'} verified`}
+            </p>
           </div>
           <div className="flex items-center gap-3">
-            {contacts.map((c, i) => (
+            {contacts.map((c) => (
               <div
-                key={c.name}
+                key={c.id}
                 className={`grid size-11 place-items-center rounded-full border-2 text-xs font-bold ${
-                  i < approved ? 'border-[#37b979] bg-[#eaf8f0] text-[#2b9d69]' : 'border-white bg-white text-[#a1afc0]'
+                  c.approved ? 'border-[#37b979] bg-[#eaf8f0] text-[#2b9d69]' : 'border-white bg-white text-[#a1afc0]'
                 }`}
               >
-                {i < approved ? <Check className="size-4" /> : c.initials}
+                {c.approved ? <Check className="size-4" /> : c.avatar_initials}
               </div>
             ))}
           </div>
@@ -721,39 +1479,64 @@ function TrustedCircle() {
         <div className="mt-5 h-2 overflow-hidden rounded-full bg-white">
           <div
             className="h-full rounded-full bg-[#37b979] transition-all"
-            style={{ width: `${(approved / 3) * 100}%` }}
+            style={{ width: contacts.length > 0 ? `${(verifiedCount / contacts.length) * 100}%` : '0%' }}
           />
         </div>
-        <p className="mt-2 text-xs text-[#637790]">{approved} of 3 approvals received</p>
+        <p className="mt-2 text-xs text-[#637790]">
+          Contacts added here start as pending verification until confirmed through an out-of-band verification service.
+        </p>
       </div>
 
-      <div className="mt-6 grid gap-4 md:grid-cols-3">
-        {contacts.map((c, i) => (
-          <div key={c.name} className="rounded-2xl border border-[#e2eaf4] bg-white p-5">
-            <div className="flex items-start justify-between">
-              <div className="grid size-11 place-items-center rounded-full bg-[#edf4ff] text-xs font-bold text-[#3567bc]">
-                {c.initials}
+      {dataLoading ? (
+        <div className="mt-6 rounded-2xl border border-[#e2eaf4] bg-white p-8 text-center text-sm text-[#8192a8]">
+          Loading trusted contacts...
+        </div>
+      ) : contacts.length === 0 ? (
+        <div className="mt-6 rounded-2xl border border-[#e2eaf4] bg-white p-8 text-center">
+          <p className="font-semibold">Your Trusted Circle is empty</p>
+          <p className="mt-1 text-sm text-[#71839a]">Add people you trust so their details are ready in an emergency.</p>
+        </div>
+      ) : (
+        <div className="mt-6 grid gap-4 md:grid-cols-3">
+          {contacts.map((c) => (
+            <div key={c.id} className="rounded-2xl border border-[#e2eaf4] bg-white p-5">
+              <div className="flex items-start justify-between">
+                <div className="grid size-11 place-items-center rounded-full bg-[#edf4ff] text-xs font-bold text-[#3567bc]">
+                  {c.avatar_initials}
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => startEdit(c)}
+                    className="rounded-lg p-1.5 text-[#71839a] hover:bg-[#f5f8fc] hover:text-[#1463ff]"
+                    aria-label={`Edit ${c.name}`}
+                  >
+                    <Pencil className="size-4" />
+                  </button>
+                  <button
+                    onClick={() => handleDelete(c)}
+                    disabled={busy}
+                    className="rounded-lg p-1.5 text-[#71839a] hover:bg-[#fff0f0] hover:text-[#c53d47]"
+                    aria-label={`Remove ${c.name}`}
+                  >
+                    <Trash2 className="size-4" />
+                  </button>
+                </div>
               </div>
-              <button className="text-[#9aaabd]">
-                <MoreHorizontal className="size-5" />
-              </button>
+              <h2 className="mt-5 font-semibold">{c.name}</h2>
+              <p className="mt-1 text-sm text-[#71839a]">{c.relation} · {maskPhoneNumber(c.phone)}</p>
+              {c.email && <p className="mt-1 truncate text-xs text-[#8192a8]">{c.email}</p>}
+              <div className="mt-5 flex items-center justify-between">
+                <span className={`flex items-center gap-1.5 text-xs font-semibold ${
+                  c.approved ? 'text-[#2b9d69]' : 'text-[#8192a8]'
+                }`}>
+                  <span className={`size-1.5 rounded-full ${c.approved ? 'bg-[#37b979]' : 'bg-[#c6d0dc]'}`} />
+                  {c.approved ? 'Verified' : 'Pending verification'}
+                </span>
+              </div>
             </div>
-            <h2 className="mt-5 font-semibold">{c.name}</h2>
-            <p className="mt-1 text-sm text-[#71839a]">{c.relation} · {c.phone}</p>
-            <div className="mt-5 flex items-center justify-between">
-              <span className={`flex items-center gap-1.5 text-xs font-semibold ${i < approved ? 'text-[#2b9d69]' : 'text-[#a1afc0]'}`}>
-                <span className={`size-1.5 rounded-full ${i < approved ? 'bg-[#37b979]' : 'bg-[#c6d0dc]'}`} />
-                {i < approved ? 'Approved' : 'Waiting'}
-              </span>
-              {i >= approved && (
-                <button onClick={() => setApproved(Math.min(3, approved + 1))} className="text-xs font-semibold text-[#1463ff]">
-                  Simulate approve
-                </button>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
 
       <div className="mt-6 rounded-2xl border border-[#e2eaf4] bg-white p-6">
         <div className="flex items-start gap-3">
@@ -761,96 +1544,281 @@ function TrustedCircle() {
             <ShieldCheck className="size-5" />
           </div>
           <div>
-            <h2 className="font-semibold">Why 2-of-3?</h2>
+            <h2 className="font-semibold">Honest Verification Policy</h2>
             <p className="mt-1 max-w-2xl text-sm leading-6 text-[#71839a]">
-              No single contact can trigger recovery alone. This simulated threshold gives you a safety layer against unauthorized access while staying practical in an emergency.
+              RETRACE never marks a contact as verified or approved unless real verification occurs. Contact invitations require an external SMS or email delivery channel in a future release.
             </p>
           </div>
         </div>
       </div>
-      {toast && (
-        <div className="fixed bottom-5 right-5 rounded-xl bg-[#0b1b35] px-4 py-3 text-sm font-medium text-white shadow-xl">
-          {toast}
+    </AppShell>
+  )
+}
+
+function Devices() {
+  const { user, devices, recoveryRequests, dataLoading, refreshData } = useAuth()
+  const [showForm, setShowForm] = useState(false)
+  const [name, setName] = useState('')
+  const [type, setType] = useState('Phone')
+  const [serialEnding, setSerialEnding] = useState('')
+  const [locationLabel, setLocationLabel] = useState('')
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [formBusy, setFormBusy] = useState(false)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+
+  const { activeRequests, activeDeviceIds } = useMemo(
+    () => getRecoveryOverview(devices, recoveryRequests),
+    [devices, recoveryRequests]
+  )
+
+  const handleAddDevice = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!user?.id) return
+    setFeedback(null)
+    setFormBusy(true)
+    try {
+      await createDevice(user.id, {
+        name,
+        type,
+        serialEnding,
+        lastLocationName: locationLabel || undefined,
+      })
+      setName('')
+      setType('Phone')
+      setSerialEnding('')
+      setLocationLabel('')
+      setShowForm(false)
+      await refreshData()
+      setFeedback({ type: 'success', text: 'Device registered to your recovery identity.' })
+    } catch (err: unknown) {
+      setFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Unable to register device.' })
+    } finally {
+      setFormBusy(false)
+    }
+  }
+
+  const handleToggleLost = async (d: Device) => {
+    if (!user?.id) return
+    setFeedback(null)
+    setBusyId(d.id)
+    try {
+      const effectiveStatus = getEffectiveDeviceStatus(d, activeDeviceIds)
+      if (effectiveStatus === 'lost') {
+        const activeReq = activeRequests.find((r) => r.device_id === d.id)
+        if (activeReq) {
+          await resolveRecoveryRequestServer(activeReq.id, 'cancel')
+        } else {
+          await updateDeviceStatus(user.id, d.id, d.name, 'protected')
+        }
+        setFeedback({ type: 'success', text: `${d.name} status restored to protected.` })
+      } else {
+        await createRecoveryRequestServer(d.id, 'Marked as lost from My Devices')
+        setFeedback({ type: 'success', text: `${d.name} marked as lost and recovery incident opened.` })
+      }
+      await refreshData()
+    } catch (err: unknown) {
+      setFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Unable to update device status.' })
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const handleDelete = async (d: Device) => {
+    if (!user?.id) return
+    setFeedback(null)
+    setBusyId(d.id)
+    try {
+      await deleteDevice(user.id, d.id, d.name)
+      await refreshData()
+      setFeedback({ type: 'success', text: `${d.name} removed.` })
+    } catch (err: unknown) {
+      setFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Unable to remove device.' })
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  return (
+    <AppShell title="My devices" description="Your protected devices">
+      <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
+        <div>
+          <h1 className="text-3xl font-semibold tracking-tight">My devices</h1>
+          <p className="mt-2 text-sm text-[#71839a]">
+            {dataLoading
+              ? 'Loading your devices...'
+              : `${devices.length} ${devices.length === 1 ? 'device' : 'devices'} registered under your recovery identity.`}
+          </p>
+        </div>
+        <Button onClick={() => setShowForm((v) => !v)}>
+          <Plus className="size-4" /> {showForm ? 'Cancel' : 'Add device'}
+        </Button>
+      </div>
+
+      {feedback && (
+        <div
+          className={`mt-6 rounded-xl border p-3.5 text-xs font-medium ${
+            feedback.type === 'success'
+              ? 'border-[#b9ebd2] bg-[#eaf8f0] text-[#1f8056]'
+              : 'border-[#fcdada] bg-[#fff5f5] text-[#c53030]'
+          }`}
+        >
+          {feedback.text}
+        </div>
+      )}
+
+      {showForm && (
+        <form onSubmit={handleAddDevice} className="mt-6 rounded-2xl border border-[#dce8f6] bg-white p-6">
+          <h2 className="font-semibold">Register a device</h2>
+          <p className="mt-1 text-xs text-[#8192a8]">
+            Enter the device details you want to track in your recovery profile.
+          </p>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <label className="text-sm font-semibold">
+              Device name
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+                placeholder="e.g., Work Phone"
+                className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-2.5 text-sm outline-none focus:border-[#1463ff]"
+              />
+            </label>
+            <label className="text-sm font-semibold">
+              Device type
+              <select
+                value={type}
+                onChange={(e) => setType(e.target.value)}
+                className="mt-2 w-full rounded-xl border border-[#dce5f2] bg-white px-4 py-2.5 text-sm outline-none focus:border-[#1463ff]"
+              >
+                <option value="Phone">Phone</option>
+                <option value="Laptop">Laptop</option>
+                <option value="Tablet">Tablet</option>
+                <option value="Other">Other</option>
+              </select>
+            </label>
+            <label className="text-sm font-semibold">
+              Last 4 digits of serial / IMEI (optional)
+              <input
+                value={serialEnding}
+                onChange={(e) => setSerialEnding(e.target.value)}
+                maxLength={12}
+                placeholder="e.g., 1234"
+                className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-2.5 text-sm outline-none focus:border-[#1463ff]"
+              />
+            </label>
+            <label className="text-sm font-semibold">
+              Current location label (optional)
+              <input
+                value={locationLabel}
+                onChange={(e) => setLocationLabel(e.target.value)}
+                placeholder="Leave blank if unknown"
+                className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-2.5 text-sm outline-none focus:border-[#1463ff]"
+              />
+            </label>
+          </div>
+          <div className="mt-5 flex gap-3">
+            <Button type="submit" disabled={formBusy}>
+              {formBusy ? 'Registering...' : 'Save device'}
+            </Button>
+            <Button variant="outline" onClick={() => setShowForm(false)} disabled={formBusy}>
+              Cancel
+            </Button>
+          </div>
+        </form>
+      )}
+
+      {dataLoading ? (
+        <div className="mt-8 rounded-2xl border border-[#e2eaf4] bg-white p-8 text-center text-sm text-[#8192a8]">
+          Loading registered devices...
+        </div>
+      ) : devices.length === 0 ? (
+        <div className="mt-8 rounded-2xl border border-[#e2eaf4] bg-white p-8 text-center">
+          <p className="font-semibold">No devices registered yet</p>
+          <p className="mt-1 text-sm text-[#71839a]">
+            Click &ldquo;Add device&rdquo; to register your phone, tablet, or laptop.
+          </p>
+        </div>
+      ) : (
+        <div className="mt-8 grid gap-4 lg:grid-cols-2">
+          {devices.map((d) => {
+            const effectiveStatus = getEffectiveDeviceStatus(d, activeDeviceIds)
+            return (
+              <div key={d.id} className="rounded-2xl border border-[#e2eaf4] bg-white p-6">
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center gap-4">
+                    <div className="grid size-14 place-items-center rounded-2xl bg-[#edf4ff] text-[#1463ff]">
+                      <DeviceIcon type={d.type} />
+                    </div>
+                    <div>
+                      <h2 className="font-semibold">{d.name}</h2>
+                      <p className="mt-1 text-sm text-[#71839a]">
+                        {d.type} · Registered {formatShortDate(d.created_at)}
+                      </p>
+                    </div>
+                  </div>
+                  <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold capitalize ${
+                    effectiveStatus === 'lost'
+                      ? 'bg-[#fff0f0] text-[#c53d47]'
+                      : 'bg-[#eaf8f0] text-[#2b9d69]'
+                  }`}>
+                    {effectiveStatus}
+                  </span>
+                </div>
+                <div className="mt-7 grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-xs text-[#8192a8]">Serial / Battery</p>
+                    <p className="mt-1 text-sm font-semibold">
+                      {d.serial_ending ? `Ends in ${d.serial_ending}` : d.battery_level !== null ? `${d.battery_level}%` : 'Not specified'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-[#8192a8]">Last recorded location</p>
+                    <p className="mt-1 text-sm font-semibold">
+                      {d.last_location_name === 'Unknown location' ? 'Not recorded yet' : d.last_location_name}
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-6 flex flex-wrap gap-3">
+                  <Button href="/recovery" className="flex-1">Recovery &amp; check-in</Button>
+                  <Button
+                    variant={effectiveStatus === 'lost' ? 'outline' : 'danger'}
+                    disabled={busyId === d.id}
+                    onClick={() => handleToggleLost(d)}
+                  >
+                    {busyId === d.id ? '...' : effectiveStatus === 'lost' ? 'Restore protected' : 'Mark lost'}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={busyId === d.id}
+                    onClick={() => handleDelete(d)}
+                    aria-label={`Remove ${d.name}`}
+                  >
+                    <Trash2 className="size-4 text-[#c53d47]" />
+                  </Button>
+                </div>
+              </div>
+            )
+          })}
         </div>
       )}
     </AppShell>
   )
 }
 
-function Devices() {
-  return (
-    <AppShell title="My devices" description="Your protected devices">
-      <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">My devices</h1>
-          <p className="mt-2 text-sm text-[#71839a]">2 devices protected by your recovery identity.</p>
-        </div>
-        <Button onClick={() => alert('Add device flow simulated')}>
-          <Plus className="size-4" /> Add device
-        </Button>
-      </div>
-
-      <div className="mt-8 grid gap-4 lg:grid-cols-2">
-        {[
-          ['Anwesha’s iPhone 15 Pro', 'iPhone', 'Online', '18%', 'Mission District, SF', 'Oct 24, 2026', Smartphone],
-          ['Anwesha’s MacBook Air', 'MacBook', 'Offline', '—', 'Last seen in Oakland, CA', 'Oct 24, 2026', Laptop]
-        ].map(([name, type, online, battery, location, date, Icon]: any) => (
-          <div key={name} className="rounded-2xl border border-[#e2eaf4] bg-white p-6">
-            <div className="flex items-start justify-between">
-              <div className="flex items-center gap-4">
-                <div className="grid size-14 place-items-center rounded-2xl bg-[#edf4ff] text-[#1463ff]">
-                  <Icon className="size-7" />
-                </div>
-                <div>
-                  <h2 className="font-semibold">{name}</h2>
-                  <p className="mt-1 text-sm text-[#71839a]">{type} · Registered {date}</p>
-                </div>
-              </div>
-              <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
-                online === 'Online' ? 'bg-[#eaf8f0] text-[#2b9d69]' : 'bg-[#f1f4f8] text-[#8192a8]'
-              }`}>
-                {online}
-              </span>
-            </div>
-            <div className="mt-7 grid grid-cols-2 gap-4">
-              <div>
-                <p className="text-xs text-[#8192a8]">Last known battery</p>
-                <p className="mt-1 text-sm font-semibold">{battery}</p>
-              </div>
-              <div>
-                <p className="text-xs text-[#8192a8]">Last known location</p>
-                <p className="mt-1 text-sm font-semibold">{location}</p>
-              </div>
-            </div>
-            <div className="mt-6 flex gap-3">
-              <Button href="/recovery" className="flex-1">View details</Button>
-              <Button variant="outline" onClick={() => alert('Location view simulated')}>
-                <MapPin className="size-4" />
-              </Button>
-            </div>
-          </div>
-        ))}
-      </div>
-    </AppShell>
-  )
-}
-
 function ActivityPage() {
+  const { activityLogs, dataLoading } = useAuth()
   const [filter, setFilter] = useState('All Activity')
-  const events = [
-    ['Device registered', 'Anwesha’s iPhone 15 Pro', 'Today, 9:42 AM', 'Device', Smartphone],
-    ['Last location recorded', 'Mission District, San Francisco', 'Today, 9:30 AM', 'Device', MapPin],
-    ['Device went offline', 'Anwesha’s MacBook Air', 'Yesterday, 6:22 PM', 'Device', CloudOff],
-    ['Recovery dashboard accessed', 'Safari on MacBook Air', 'Yesterday, 4:20 PM', 'Security', Globe2],
-    ['Trusted contact approved', 'Maya Patel approved recovery', 'Yesterday, 4:18 PM', 'Recovery', UsersRound],
-    ['Backup verification completed', 'Recovery identity verified', 'Oct 24, 2026', 'Security', ShieldCheck]
-  ]
+
+  const filteredLogs = useMemo(
+    () => activityLogs.filter((e) => filter === 'All Activity' || e.category === filter),
+    [activityLogs, filter]
+  )
 
   return (
     <AppShell title="Activity timeline" description="A transparent record of your safety">
       <div>
         <h1 className="text-3xl font-semibold tracking-tight">Activity timeline</h1>
-        <p className="mt-2 text-sm text-[#71839a]">A clear record of everything important.</p>
+        <p className="mt-2 text-sm text-[#71839a]">A clear record of real events across your account.</p>
       </div>
 
       <div className="mt-7 flex flex-wrap gap-2">
@@ -868,38 +1836,68 @@ function ActivityPage() {
       </div>
 
       <div className="mt-8 max-w-3xl rounded-2xl border border-[#e2eaf4] bg-white p-6">
-        <div className="flex flex-col gap-7">
-          {events.filter((e) => filter === 'All Activity' || e[3] === filter).map(([a, b, c, , Icon]: any, i) => (
-            <div key={a} className="relative flex gap-4">
-              <div className="relative z-10 grid size-10 shrink-0 place-items-center rounded-xl bg-[#edf4ff] text-[#1463ff]">
-                <Icon className="size-4" />
-              </div>
-              {i < events.length - 1 && (
-                <div className="absolute bottom-[-28px] left-5 top-10 w-px bg-[#e3ebf5]" />
-              )}
-              <div>
-                <p className="font-semibold">{a}</p>
-                <p className="mt-1 text-sm text-[#71839a]">{b}</p>
-                <p className="mt-2 text-xs text-[#a1afc0]">{c}</p>
-              </div>
-            </div>
-          ))}
-        </div>
+        {dataLoading ? (
+          <p className="text-sm text-[#8192a8]">Loading activity history...</p>
+        ) : filteredLogs.length === 0 ? (
+          <div className="py-6 text-center">
+            <p className="font-semibold">No activity logs found</p>
+            <p className="mt-1 text-sm text-[#71839a]">
+              {filter === 'All Activity'
+                ? 'Actions such as registering devices, updating your PIN, or starting recovery will appear here.'
+                : `No events recorded under ${filter}.`}
+            </p>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-7">
+            {filteredLogs.map((log, i) => {
+              const Icon =
+                log.category === 'Device'
+                  ? Smartphone
+                  : log.category === 'Recovery'
+                  ? Radar
+                  : ShieldCheck
+              return (
+                <div key={log.id} className="relative flex gap-4">
+                  <div className="relative z-10 grid size-10 shrink-0 place-items-center rounded-xl bg-[#edf4ff] text-[#1463ff]">
+                    <Icon className="size-4" />
+                  </div>
+                  {i < filteredLogs.length - 1 && (
+                    <div className="absolute bottom-[-28px] left-5 top-10 w-px bg-[#e3ebf5]" />
+                  )}
+                  <div>
+                    <p className="font-semibold">{log.title}</p>
+                    <p className="mt-1 text-sm text-[#71839a]">{log.description}</p>
+                    <p className="mt-2 text-xs text-[#a1afc0]">
+                      {log.category} · {formatTimestamp(log.created_at)}
+                    </p>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
     </AppShell>
   )
 }
 
 function Passport() {
+  const { user, profile, devices, contacts, recoveryRequests, profileLoading, dataLoading } = useAuth()
+  const displayName = profile?.full_name || user?.user_metadata?.full_name || user?.email || 'Authenticated User'
+  const { activeDeviceIds } = useMemo(
+    () => getRecoveryOverview(devices, recoveryRequests),
+    [devices, recoveryRequests]
+  )
+
   return (
     <AppShell title="Emergency passport" description="Your essential recovery information">
       <div className="max-w-4xl">
-        <div className="flex items-end justify-between">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h1 className="text-3xl font-semibold tracking-tight">Digital emergency passport</h1>
             <p className="mt-2 text-sm text-[#71839a]">Private, practical information for a stressful moment.</p>
           </div>
-          <Button variant="outline" onClick={() => alert('Print view simulated')}>
+          <Button variant="outline" onClick={() => window.print()}>
             <ExternalLink className="size-4" /> Print view
           </Button>
         </div>
@@ -911,38 +1909,71 @@ function Passport() {
             </div>
             <div>
               <p className="text-xs font-semibold uppercase tracking-wider text-[#4773b8]">Recovery identity</p>
-              <p className="mt-1 font-semibold">RTR-2048-ANWESHA</p>
+              <p className="mt-1 font-semibold">
+                {profileLoading ? 'Loading recovery ID...' : profile?.recovery_id ?? 'Identity unavailable'}
+              </p>
+              <p className="mt-0.5 text-xs text-[#60738c]">Holder: {displayName}</p>
             </div>
             <span className="ml-auto rounded-full bg-[#eaf8f0] px-2.5 py-1 text-[11px] font-semibold text-[#2b9d69]">
-              Active
+              {profile?.is_verified ? 'Verified' : 'Active'}
             </span>
           </div>
         </div>
 
         <div className="mt-6 grid gap-6 md:grid-cols-2">
           <section className="rounded-2xl border border-[#e2eaf4] bg-white p-6">
-            <h2 className="font-semibold">Registered device</h2>
-            <div className="mt-5 flex items-center gap-3">
-              <div className="grid size-10 place-items-center rounded-xl bg-[#edf4ff] text-[#1463ff]">
-                <Smartphone className="size-5" />
+            <h2 className="font-semibold">Registered devices</h2>
+            {dataLoading ? (
+              <p className="mt-4 text-xs text-[#8192a8]">Loading devices...</p>
+            ) : devices.length === 0 ? (
+              <p className="mt-4 text-xs text-[#8192a8]">No devices registered yet.</p>
+            ) : (
+              <div className="mt-5 flex flex-col gap-4">
+                {devices.map((d) => {
+                  const effectiveStatus = getEffectiveDeviceStatus(d, activeDeviceIds)
+                  return (
+                    <div key={d.id} className="flex items-center gap-3">
+                      <div className="grid size-10 place-items-center rounded-xl bg-[#edf4ff] text-[#1463ff]">
+                        <DeviceIcon type={d.type} className="size-5" />
+                      </div>
+                      <div>
+                        <p className="text-sm font-semibold">{d.name}</p>
+                        <p className="text-xs text-[#8192a8] capitalize">
+                          {d.serial_ending ? `Serial ending in ${d.serial_ending} · ` : `${d.type} · `}
+                          {effectiveStatus}
+                        </p>
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
-              <div>
-                <p className="text-sm font-semibold">iPhone 15 Pro</p>
-                <p className="text-xs text-[#8192a8]">Serial ending in 4821 · Protected</p>
-              </div>
-            </div>
+            )}
           </section>
 
           <section className="rounded-2xl border border-[#e2eaf4] bg-white p-6">
             <h2 className="font-semibold">Recovery contacts</h2>
-            <div className="mt-5 flex gap-2">
-              {contacts.map((c) => (
-                <div key={c.name} className="grid size-10 place-items-center rounded-full bg-[#edf4ff] text-xs font-bold text-[#3567bc]">
-                  {c.initials}
+            {dataLoading ? (
+              <p className="mt-4 text-xs text-[#8192a8]">Loading contacts...</p>
+            ) : contacts.length === 0 ? (
+              <p className="mt-4 text-xs text-[#8192a8]">No trusted contacts added yet.</p>
+            ) : (
+              <>
+                <div className="mt-5 flex flex-wrap gap-2">
+                  {contacts.map((c) => (
+                    <div
+                      key={c.id}
+                      className="flex items-center gap-2 rounded-full bg-[#edf4ff] py-1.5 pl-1.5 pr-3 text-xs font-semibold text-[#3567bc]"
+                    >
+                      <span className="grid size-7 place-items-center rounded-full bg-white text-[11px] font-bold">
+                        {c.avatar_initials}
+                      </span>
+                      <span>{c.name}</span>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-            <p className="mt-3 text-xs text-[#8192a8]">Phone numbers and email remain masked.</p>
+                <p className="mt-3 text-xs text-[#8192a8]">Phone numbers remain masked for privacy.</p>
+              </>
+            )}
           </section>
         </div>
 
@@ -950,9 +1981,9 @@ function Passport() {
           <h2 className="font-semibold">Emergency checklist</h2>
           <div className="mt-5 grid gap-3">
             {[
-              'Attempt to locate the device.',
-              'Contact trusted people.',
-              'Mark the device as lost.',
+              'Attempt to locate or check in the device.',
+              'Contact trusted people in your circle.',
+              'Mark the device as lost in RETRACE.',
               'Contact your mobile network provider.',
               'Contact relevant financial institutions if needed.',
               'Follow official reporting procedures if theft is suspected.'
@@ -976,7 +2007,32 @@ function Passport() {
 
 function SettingsPage() {
   const router = useRouter()
-  const { user, signOut } = useAuth()
+  const { user, profile, profileLoading, refreshProfile, refreshData, signOut } = useAuth()
+
+  const [activePanel, setActivePanel] = useState<'profile' | 'pin' | 'phone' | 'privacy' | null>(null)
+  const [nameInput, setNameInput] = useState('')
+  const [phoneInput, setPhoneInput] = useState('')
+  const [pinInput, setPinInput] = useState('')
+  const [confirmPinInput, setConfirmPinInput] = useState('')
+  const [geoPermission, setGeoPermission] = useState<string>('Unknown')
+  const [busy, setBusy] = useState(false)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+
+  useEffect(() => {
+    if (profile) {
+      setNameInput(profile.full_name)
+      setPhoneInput(profile.backup_phone ?? '')
+    }
+  }, [profile])
+
+  useEffect(() => {
+    if (typeof navigator !== 'undefined' && navigator.permissions?.query) {
+      navigator.permissions
+        .query({ name: 'geolocation' })
+        .then((res) => setGeoPermission(res.state))
+        .catch(() => setGeoPermission('Prompt on check-in'))
+    }
+  }, [])
 
   const handleSignOut = async () => {
     try {
@@ -988,39 +2044,255 @@ function SettingsPage() {
     }
   }
 
-  const profileSummary = user?.user_metadata?.full_name
-    ? `${user.user_metadata.full_name} · ${user.email ?? ''}`
-    : user?.email ?? 'Anwesha Sharma · anwesha@example.com'
+  const handleSaveProfileName = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!user?.id) return
+    setFeedback(null)
+    setBusy(true)
+    try {
+      await updateProfileDetails(user.id, { fullName: nameInput })
+      await Promise.all([refreshProfile(), refreshData()])
+      setActivePanel(null)
+      setFeedback({ type: 'success', text: 'Profile name updated.' })
+    } catch (err: unknown) {
+      setFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Unable to update profile.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleSaveBackupPhone = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!user?.id) return
+    setFeedback(null)
+    setBusy(true)
+    try {
+      await updateProfileDetails(user.id, { backupPhone: phoneInput })
+      await Promise.all([refreshProfile(), refreshData()])
+      setActivePanel(null)
+      setFeedback({ type: 'success', text: 'Backup phone number updated.' })
+    } catch (err: unknown) {
+      setFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Unable to update backup phone.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleSavePin = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setFeedback(null)
+    if (!/^\d{4,6}$/.test(pinInput.trim())) {
+      setFeedback({ type: 'error', text: 'Recovery PIN must be 4 to 6 numeric digits.' })
+      return
+    }
+    if (pinInput.trim() !== confirmPinInput.trim()) {
+      setFeedback({ type: 'error', text: 'Recovery PINs do not match.' })
+      return
+    }
+    setBusy(true)
+    try {
+      await saveRecoveryPinServer(pinInput.trim())
+      setPinInput('')
+      setConfirmPinInput('')
+      await Promise.all([refreshProfile(), refreshData()])
+      setActivePanel(null)
+      setFeedback({ type: 'success', text: 'Recovery PIN hashed and saved securely on the server.' })
+    } catch (err: unknown) {
+      setFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Unable to save Recovery PIN.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const displayName = profile?.full_name || user?.user_metadata?.full_name
+  const profileSummary = profileLoading
+    ? 'Loading profile...'
+    : displayName
+    ? `${displayName}${user?.email ? ` · ${user.email}` : ''}`
+    : user?.email ?? 'Authenticated user'
+
+  const securitySummary = profileLoading
+    ? 'Checking security status...'
+    : profile?.has_recovery_pin
+    ? `Password active · Recovery PIN configured (${profile.is_verified ? 'Verified' : 'Unverified'})`
+    : 'Password active · Recovery PIN not configured yet'
+
+  const phoneSummary = profileLoading ? 'Loading...' : maskPhoneNumber(profile?.backup_phone)
 
   return (
     <AppShell title="Settings" description="Manage your recovery identity">
       <div className="max-w-4xl">
         <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
         <p className="mt-2 text-sm text-[#71839a]">Keep your recovery identity current and secure.</p>
+
+        {feedback && (
+          <div
+            className={`mt-6 rounded-xl border p-3.5 text-xs font-medium ${
+              feedback.type === 'success'
+                ? 'border-[#b9ebd2] bg-[#eaf8f0] text-[#1f8056]'
+                : 'border-[#fcdada] bg-[#fff5f5] text-[#c53030]'
+            }`}
+          >
+            {feedback.text}
+          </div>
+        )}
+
         <div className="mt-8 flex flex-col gap-5">
-          {[
-            ['Profile information', profileSummary, UserRound],
-            ['Account security', 'Password, recovery PIN and verification', LockKeyhole],
-            ['Backup phone number', '+1 (415) ••• ••82', Phone],
-            ['Notification preferences', 'Recovery requests and device updates', Bell],
-            ['Privacy and location permissions', 'Location sharing is permission-based', Globe2]
-          ].map(([t, d, Icon]: any) => (
+          <div className="rounded-2xl border border-[#e2eaf4] bg-white">
             <button
-              key={t}
-              onClick={() => alert(`${t} settings simulated`)}
-              className="flex items-center gap-4 rounded-2xl border border-[#e2eaf4] bg-white p-5 text-left transition hover:border-[#b8cbea]"
+              onClick={() => setActivePanel(activePanel === 'profile' ? null : 'profile')}
+              className="flex w-full items-center gap-4 p-5 text-left transition hover:bg-[#fbfdff]"
             >
               <span className="grid size-11 place-items-center rounded-xl bg-[#edf4ff] text-[#1463ff]">
-                <Icon className="size-5" />
+                <UserRound className="size-5" />
               </span>
               <span className="flex-1">
-                <span className="block font-semibold">{t}</span>
-                <span className="mt-1 block text-sm text-[#8192a8]">{d}</span>
+                <span className="block font-semibold">Profile information</span>
+                <span className="mt-1 block text-sm text-[#8192a8]">{profileSummary}</span>
               </span>
               <ArrowRight className="size-4 text-[#9aaabd]" />
             </button>
-          ))}
+            {activePanel === 'profile' && (
+              <form onSubmit={handleSaveProfileName} className="border-t border-[#eef3f9] p-5">
+                <label className="text-sm font-semibold">
+                  Full name
+                  <input
+                    value={nameInput}
+                    onChange={(e) => setNameInput(e.target.value)}
+                    required
+                    className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-2.5 text-sm outline-none focus:border-[#1463ff]"
+                  />
+                </label>
+                <div className="mt-4 flex gap-3">
+                  <Button type="submit" disabled={busy}>{busy ? 'Saving...' : 'Update name'}</Button>
+                  <Button variant="outline" onClick={() => setActivePanel(null)}>Cancel</Button>
+                </div>
+              </form>
+            )}
+          </div>
+
+          <div className="rounded-2xl border border-[#e2eaf4] bg-white">
+            <button
+              onClick={() => setActivePanel(activePanel === 'pin' ? null : 'pin')}
+              className="flex w-full items-center gap-4 p-5 text-left transition hover:bg-[#fbfdff]"
+            >
+              <span className="grid size-11 place-items-center rounded-xl bg-[#edf4ff] text-[#1463ff]">
+                <LockKeyhole className="size-5" />
+              </span>
+              <span className="flex-1">
+                <span className="block font-semibold">Account security &amp; Recovery PIN</span>
+                <span className="mt-1 block text-sm text-[#8192a8]">{securitySummary}</span>
+              </span>
+              <ArrowRight className="size-4 text-[#9aaabd]" />
+            </button>
+            {activePanel === 'pin' && (
+              <form onSubmit={handleSavePin} className="border-t border-[#eef3f9] p-5">
+                <p className="text-xs text-[#71839a]">
+                  Your PIN is hashed server-side using scrypt and never stored in plaintext.
+                </p>
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  <label className="text-sm font-semibold">
+                    {profile?.has_recovery_pin ? 'New Recovery PIN (4–6 digits)' : 'Create Recovery PIN (4–6 digits)'}
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      maxLength={6}
+                      value={pinInput}
+                      onChange={(e) => setPinInput(e.target.value.replace(/\D/g, ''))}
+                      placeholder="••••"
+                      className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-2.5 text-sm outline-none focus:border-[#1463ff]"
+                    />
+                  </label>
+                  <label className="text-sm font-semibold">
+                    Confirm Recovery PIN
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      maxLength={6}
+                      value={confirmPinInput}
+                      onChange={(e) => setConfirmPinInput(e.target.value.replace(/\D/g, ''))}
+                      placeholder="••••"
+                      className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-2.5 text-sm outline-none focus:border-[#1463ff]"
+                    />
+                  </label>
+                </div>
+                <div className="mt-4 flex flex-wrap gap-3">
+                  <Button type="submit" disabled={busy}>{busy ? 'Hashing & saving...' : 'Save Recovery PIN'}</Button>
+                  <Button href="/verify" variant="outline">Verify existing PIN</Button>
+                </div>
+              </form>
+            )}
+          </div>
+
+          <div className="rounded-2xl border border-[#e2eaf4] bg-white">
+            <button
+              onClick={() => setActivePanel(activePanel === 'phone' ? null : 'phone')}
+              className="flex w-full items-center gap-4 p-5 text-left transition hover:bg-[#fbfdff]"
+            >
+              <span className="grid size-11 place-items-center rounded-xl bg-[#edf4ff] text-[#1463ff]">
+                <Phone className="size-5" />
+              </span>
+              <span className="flex-1">
+                <span className="block font-semibold">Backup phone number</span>
+                <span className="mt-1 block text-sm text-[#8192a8]">{phoneSummary}</span>
+              </span>
+              <ArrowRight className="size-4 text-[#9aaabd]" />
+            </button>
+            {activePanel === 'phone' && (
+              <form onSubmit={handleSaveBackupPhone} className="border-t border-[#eef3f9] p-5">
+                <label className="text-sm font-semibold">
+                  Backup phone number
+                  <input
+                    value={phoneInput}
+                    onChange={(e) => setPhoneInput(e.target.value)}
+                    placeholder="+1 415 555 0100"
+                    className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-2.5 text-sm outline-none focus:border-[#1463ff]"
+                  />
+                </label>
+                <div className="mt-4 flex gap-3">
+                  <Button type="submit" disabled={busy}>{busy ? 'Saving...' : 'Save backup phone'}</Button>
+                  <Button variant="outline" onClick={() => setActivePanel(null)}>Cancel</Button>
+                </div>
+              </form>
+            )}
+          </div>
+
+          <div className="flex items-center gap-4 rounded-2xl border border-[#e2eaf4] bg-white p-5">
+            <span className="grid size-11 place-items-center rounded-xl bg-[#edf4ff] text-[#1463ff]">
+              <Bell className="size-5" />
+            </span>
+            <span className="flex-1">
+              <span className="block font-semibold">Notification preferences</span>
+              <span className="mt-1 block text-sm text-[#8192a8]">
+                In-app activity timeline is active. SMS/email alerts require external messaging integration.
+              </span>
+            </span>
+          </div>
+
+          <div className="rounded-2xl border border-[#e2eaf4] bg-white">
+            <button
+              onClick={() => setActivePanel(activePanel === 'privacy' ? null : 'privacy')}
+              className="flex w-full items-center gap-4 p-5 text-left transition hover:bg-[#fbfdff]"
+            >
+              <span className="grid size-11 place-items-center rounded-xl bg-[#edf4ff] text-[#1463ff]">
+                <Globe2 className="size-5" />
+              </span>
+              <span className="flex-1">
+                <span className="block font-semibold">Privacy and location permissions</span>
+                <span className="mt-1 block text-sm text-[#8192a8]">
+                  Browser geolocation status: {geoPermission} · Explicit check-in only
+                </span>
+              </span>
+              <ArrowRight className="size-4 text-[#9aaabd]" />
+            </button>
+            {activePanel === 'privacy' && (
+              <div className="border-t border-[#eef3f9] p-5 text-xs leading-5 text-[#60738c]">
+                RETRACE only collects coordinates when you explicitly trigger a location check-in on the Recovery page and allow permission in your browser. All user records are protected by PostgreSQL Row Level Security.
+              </div>
+            )}
+          </div>
         </div>
+
         <Button onClick={handleSignOut} variant="danger" className="mt-6">
           <LogOut className="size-4" /> Sign out
         </Button>
@@ -1031,6 +2303,7 @@ function SettingsPage() {
 
 function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: string }) {
   const router = useRouter()
+  const { user, refreshProfile, refreshData } = useAuth()
   const [show, setShow] = useState(false)
   const [step, setStep] = useState(1)
   const isRegister = type === 'register'
@@ -1046,7 +2319,12 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
   const [deviceType, setDeviceType] = useState('')
   const [contactName, setContactName] = useState('')
   const [contactPhone, setContactPhone] = useState('')
-  const [rememberMe, setRememberMe] = useState(false)
+  const [rememberMe, setRememberMe] = useState(true)
+
+  // Password reset inline state
+  const [resetOpen, setResetOpen] = useState(false)
+  const [resetEmail, setResetEmail] = useState('')
+  const [resetSent, setResetSent] = useState(false)
 
   // Status & error states
   const [loading, setLoading] = useState(false)
@@ -1079,6 +2357,27 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
     }
   }
 
+  const handlePasswordReset = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    const targetEmail = (resetEmail || email).trim()
+    if (!targetEmail || !targetEmail.includes('@')) {
+      setError('Please enter a valid email address for password reset.')
+      return
+    }
+
+    setLoading(true)
+    try {
+      const redirectTo = typeof window !== 'undefined' ? `${window.location.origin}/login` : undefined
+      await sendPasswordReset(targetEmail, redirectTo)
+      setResetSent(true)
+    } catch (err: any) {
+      setError(err?.message || 'Unable to send password reset email.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const handleRegisterStep = (nextStep: number) => {
     setError(null)
     if (step === 1 && nextStep > 1) {
@@ -1095,6 +2394,12 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
         return
       }
     }
+    if (step === 2 && nextStep > 2 && recoveryPin.trim()) {
+      if (!/^\d{4,6}$/.test(recoveryPin.trim())) {
+        setError('Recovery PIN must be 4 to 6 numeric digits (or leave blank to set later).')
+        return
+      }
+    }
     setStep(nextStep)
   }
 
@@ -1102,17 +2407,35 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
     setError(null)
     setLoading(true)
     try {
-      // Per security requirements:
-      // Store ONLY full_name in Supabase Auth user metadata for now.
-      // Do not store recovery PIN, backup phone, device or contact info in plain text or Auth metadata.
+      // Store ONLY full_name in Supabase Auth user metadata.
       const result = await signUp({
         email: email.trim(),
         password,
         fullName: fullName.trim(),
       })
 
-      if (result.session) {
-        // Auto-confirm was enabled in project settings
+      if (result.session && result.user) {
+        // Persist optional onboarding fields only when an authenticated session exists.
+        if (backupPhone.trim()) {
+          await updateProfileDetails(result.user.id, { backupPhone: backupPhone.trim() }).catch(() => {})
+        }
+        if (/^\d{4,6}$/.test(recoveryPin.trim())) {
+          await saveRecoveryPinServer(recoveryPin.trim()).catch(() => {})
+        }
+        if (deviceName.trim() && deviceType.trim()) {
+          await createDevice(result.user.id, {
+            name: deviceName.trim(),
+            type: deviceType.trim(),
+          }).catch(() => {})
+        }
+        if (contactName.trim() && contactPhone.trim()) {
+          await createTrustedContact(result.user.id, {
+            name: contactName.trim(),
+            relation: 'Trusted Contact',
+            phone: contactPhone.trim(),
+          }).catch(() => {})
+        }
+        await Promise.all([refreshProfile(), refreshData()])
         router.push('/dashboard')
       } else {
         // Email confirmation is required by Supabase
@@ -1150,7 +2473,7 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
                 <LockKeyhole className="size-4 text-[#1463ff]" /> Security Note
               </div>
               <p className="mt-1">
-                Your recovery identity is protected. Once you confirm your email address, you can sign in and manage your protected devices and trusted circle.
+                For your security, devices, backup phone, Recovery PIN, and trusted contacts are saved only after your email is confirmed and you sign in.
               </p>
             </div>
             <Button href="/login" className="mt-8 w-full">
@@ -1199,16 +2522,52 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
             </div>
           )}
 
+          {resetSent && (
+            <div className="mt-6 rounded-xl border border-[#b9ebd2] bg-[#eaf8f0] p-3.5 text-xs font-medium text-[#1f8056]">
+              Password reset instructions have been sent to {resetEmail || email}.
+            </div>
+          )}
+
           {isRecover ? (
             <div className="mt-8 flex flex-col gap-3">
-              <Button href="/verify" className="w-full">
-                Continue with RETRACE credentials <ArrowRight className="size-4" />
-              </Button>
-              <Button href="/verify" variant="outline" className="w-full">
-                <FileKey2 className="size-4" /> Use recovery code
-              </Button>
+              {user ? (
+                <>
+                  <Button href="/recovery" className="w-full">
+                    Open lost-device recovery center <ArrowRight className="size-4" />
+                  </Button>
+                  <Button href="/verify" variant="outline" className="w-full">
+                    <FileKey2 className="size-4" /> Verify Recovery PIN
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button href="/login" className="w-full">
+                    Sign in with RETRACE credentials <ArrowRight className="size-4" />
+                  </Button>
+                  <Button variant="outline" onClick={() => setResetOpen((v) => !v)} className="w-full">
+                    <FileKey2 className="size-4" /> Reset forgotten password
+                  </Button>
+                  {resetOpen && (
+                    <form onSubmit={handlePasswordReset} className="mt-2 flex flex-col gap-3 rounded-xl bg-[#f5f8fd] p-4">
+                      <label className="text-xs font-semibold text-[#27405e]">
+                        Account email
+                        <input
+                          type="email"
+                          value={resetEmail}
+                          onChange={(e) => setResetEmail(e.target.value)}
+                          placeholder="you@example.com"
+                          className="mt-1.5 w-full rounded-xl border border-[#dce5f2] bg-white px-3 py-2 text-sm outline-none focus:border-[#1463ff]"
+                        />
+                      </label>
+                      <Button type="submit" disabled={loading} className="py-2 text-xs">
+                        {loading ? 'Sending...' : 'Send password reset email'}
+                      </Button>
+                    </form>
+                  )}
+                </>
+              )}
               <div className="mt-4 rounded-xl bg-[#f5f8fd] p-4 text-sm leading-6 text-[#637790]">
-                <Phone className="mr-2 inline size-4 text-[#1463ff]" /> Backup phone verification and Trusted Circle approval are available on the next step.
+                <Phone className="mr-2 inline size-4 text-[#1463ff]" /> Recovery actions are protected by Supabase Auth and Row Level Security.
               </div>
             </div>
           ) : (
@@ -1222,7 +2581,7 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
                       onChange={(e) => setFullName(e.target.value)}
                       disabled={loading}
                       className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-3 text-sm outline-none focus:border-[#1463ff] disabled:bg-[#f6f9fc]"
-                      placeholder="Anwesha Sharma"
+                      placeholder="Your full name"
                     />
                   </label>
                   <label className="text-sm font-semibold">
@@ -1245,7 +2604,7 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
                         onChange={(e) => setPassword(e.target.value)}
                         disabled={loading}
                         className="w-full rounded-xl border border-[#dce5f2] px-4 py-3 pr-11 text-sm outline-none focus:border-[#1463ff] disabled:bg-[#f6f9fc]"
-                        placeholder="8+ characters"
+                        placeholder="6+ characters"
                       />
                       <button
                         type="button"
@@ -1263,7 +2622,7 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
               ) : isRegister ? (
                 <>
                   <label className="text-sm font-semibold">
-                    {step === 2 ? 'Backup phone number' : step === 3 ? 'Device name' : 'Trusted contact name'}
+                    {step === 2 ? 'Backup phone number (optional)' : step === 3 ? 'Device name (optional)' : 'Trusted contact name (optional)'}
                     <input
                       value={step === 2 ? backupPhone : step === 3 ? deviceName : contactName}
                       onChange={(e) => {
@@ -1273,21 +2632,22 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
                       }}
                       disabled={loading}
                       className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-3 text-sm outline-none focus:border-[#1463ff] disabled:bg-[#f6f9fc]"
-                      placeholder={step === 2 ? '+1 415 555 0182' : step === 3 ? 'Anwesha’s iPhone 15 Pro' : 'Maya Patel'}
+                      placeholder={step === 2 ? '+1 415 555 0100' : step === 3 ? 'My Primary Phone' : 'Contact full name'}
                     />
                   </label>
                   <label className="text-sm font-semibold">
-                    {step === 2 ? 'Create recovery PIN' : step === 3 ? 'Device type' : 'Phone number'}
+                    {step === 2 ? 'Create recovery PIN (4–6 digits, optional)' : step === 3 ? 'Device type' : 'Contact phone number'}
                     <input
+                      type={step === 2 ? 'password' : 'text'}
                       value={step === 2 ? recoveryPin : step === 3 ? deviceType : contactPhone}
                       onChange={(e) => {
-                        if (step === 2) setRecoveryPin(e.target.value)
+                        if (step === 2) setRecoveryPin(e.target.value.replace(/\D/g, ''))
                         else if (step === 3) setDeviceType(e.target.value)
                         else setContactPhone(e.target.value)
                       }}
                       disabled={loading}
                       className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-3 text-sm outline-none focus:border-[#1463ff] disabled:bg-[#f6f9fc]"
-                      placeholder={step === 2 ? '••••' : step === 3 ? 'iPhone' : '+1 415 555 0182'}
+                      placeholder={step === 2 ? '••••' : step === 3 ? 'Phone' : '+1 415 555 0100'}
                     />
                   </label>
                   <div className="flex gap-3">
@@ -1306,7 +2666,7 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
               ) : (
                 <>
                   <label className="text-sm font-semibold">
-                    Email or registered phone
+                    Email address
                     <input
                       type="email"
                       value={email}
@@ -1340,15 +2700,37 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
                     </div>
                   </label>
                   <div className="flex justify-between text-xs text-[#71839a]">
-                    <label className="flex items-center gap-2 cursor-pointer">
+                    <label className="flex cursor-pointer items-center gap-2">
                       <input
                         type="checkbox"
                         checked={rememberMe}
                         onChange={(e) => setRememberMe(e.target.checked)}
-                      /> Remember me
+                      /> Keep session active
                     </label>
-                    <a className="font-semibold text-[#1463ff]" href="#">Forgot password?</a>
+                    <button
+                      type="button"
+                      onClick={() => setResetOpen((v) => !v)}
+                      className="font-semibold text-[#1463ff]"
+                    >
+                      Forgot password?
+                    </button>
                   </div>
+
+                  {resetOpen && (
+                    <form onSubmit={handlePasswordReset} className="flex flex-col gap-2 rounded-xl bg-[#f5f8fd] p-3">
+                      <input
+                        type="email"
+                        value={resetEmail || email}
+                        onChange={(e) => setResetEmail(e.target.value)}
+                        placeholder="Enter email for reset link"
+                        className="w-full rounded-lg border border-[#dce5f2] bg-white px-3 py-2 text-xs outline-none focus:border-[#1463ff]"
+                      />
+                      <Button type="submit" variant="outline" disabled={loading} className="py-2 text-xs">
+                        {loading ? 'Sending...' : 'Send reset email'}
+                      </Button>
+                    </form>
+                  )}
+
                   <Button onClick={() => handleLogin()} disabled={loading} className="mt-2 w-full">
                     {loading ? 'Signing in...' : 'Sign in'} <ArrowRight className="size-4" />
                   </Button>
@@ -1375,12 +2757,39 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
 }
 
 function Verify() {
-  const [approved, setApproved] = useState(1)
+  const router = useRouter()
+  const { user, profile, refreshProfile, refreshData } = useAuth()
+  const [pin, setPin] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [verified, setVerified] = useState(false)
+
+  const handleVerifyPin = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    if (!/^\d{4,6}$/.test(pin.trim())) {
+      setError('Enter your 4 to 6 digit Recovery PIN.')
+      return
+    }
+    setBusy(true)
+    try {
+      const ok = await verifyRecoveryPinServer(pin.trim())
+      if (ok) {
+        setVerified(true)
+        await Promise.all([refreshProfile(), refreshData()])
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Verification failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="min-h-screen bg-[#f7faff] text-[#0b1b35]">
       <header className="mx-auto flex max-w-7xl items-center justify-between px-5 py-5 lg:px-8">
         <Brand />
-        <Link href="/recover" className="flex items-center gap-2 text-sm font-semibold text-[#71839a]">
+        <Link href={user ? '/dashboard' : '/recover'} className="flex items-center gap-2 text-sm font-semibold text-[#71839a]">
           <ArrowLeft className="size-4" /> Back
         </Link>
       </header>
@@ -1389,40 +2798,59 @@ function Verify() {
           <div className="grid size-12 place-items-center rounded-2xl bg-[#eaf8f0] text-[#2b9d69]">
             <ShieldCheck className="size-6" />
           </div>
-          <h1 className="mt-6 text-3xl font-semibold tracking-tight">Verify your recovery</h1>
-          <p className="mt-3 text-sm leading-6 text-[#71839a]">
-            We sent a simulated verification code to your backup phone ending in <strong className="text-[#27405e]">82</strong>.
-          </p>
-          <div className="mt-8 flex gap-2">
-            {[1, 2, 3, 4, 5, 6].map((n) => (
+          <h1 className="mt-6 text-3xl font-semibold tracking-tight">Security verification</h1>
+
+          {!user ? (
+            <>
+              <p className="mt-3 text-sm leading-6 text-[#71839a]">
+                Please sign in with your RETRACE account before verifying your Recovery PIN.
+              </p>
+              <Button href="/login" className="mt-6 w-full">
+                Sign in to verify <ArrowRight className="size-4" />
+              </Button>
+            </>
+          ) : !profile?.has_recovery_pin ? (
+            <>
+              <p className="mt-3 text-sm leading-6 text-[#71839a]">
+                You haven&apos;t configured a Recovery PIN yet. Set one in Settings to enable PIN verification.
+              </p>
+              <Button href="/settings" className="mt-6 w-full">
+                Configure Recovery PIN in Settings <ArrowRight className="size-4" />
+              </Button>
+            </>
+          ) : verified ? (
+            <div className="mt-6 rounded-2xl bg-[#eaf8f0] p-6 text-center">
+              <CheckCircle2 className="mx-auto size-10 text-[#2b9d69]" />
+              <h2 className="mt-3 text-lg font-semibold text-[#1f8056]">Recovery identity verified</h2>
+              <p className="mt-1 text-sm text-[#4b8a6d]">Your Recovery PIN was verified securely on the server.</p>
+              <Button onClick={() => router.push('/dashboard')} className="mt-5 w-full">
+                Return to dashboard <ArrowRight className="size-4" />
+              </Button>
+            </div>
+          ) : (
+            <form onSubmit={handleVerifyPin} className="mt-6 flex flex-col gap-4">
+              <p className="text-sm leading-6 text-[#71839a]">
+                Enter your 4 to 6 digit Recovery PIN to verify your identity via server-side scrypt validation.
+              </p>
+              {error && (
+                <div className="rounded-xl border border-[#fed7d7] bg-[#fff5f5] p-3.5 text-xs font-medium text-[#c53030]">
+                  {error}
+                </div>
+              )}
               <input
-                key={n}
-                maxLength={1}
-                className="size-11 rounded-xl border border-[#dce5f2] text-center text-lg font-semibold outline-none focus:border-[#1463ff]"
-                aria-label={`Digit ${n}`}
+                type="password"
+                inputMode="numeric"
+                maxLength={6}
+                value={pin}
+                onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))}
+                placeholder="Enter 4–6 digit PIN"
+                className="w-full rounded-xl border border-[#dce5f2] px-4 py-3 text-center text-lg font-semibold tracking-[0.4em] outline-none focus:border-[#1463ff]"
               />
-            ))}
-          </div>
-          <Button href="/dashboard" className="mt-6 w-full">
-            Verify and continue <ArrowRight className="size-4" />
-          </Button>
-          <div className="mt-8 rounded-2xl bg-[#f5f8fd] p-5">
-            <div className="flex items-center justify-between">
-              <p className="text-sm font-semibold">Trusted Circle approval</p>
-              <span className="text-xs font-semibold text-[#2b9d69]">{approved} of 2 required</span>
-            </div>
-            <div className="mt-4 flex gap-2">
-              <div className="h-2 flex-1 rounded-full bg-[#37b979]" />
-              <div className={`h-2 flex-1 rounded-full ${approved >= 2 ? 'bg-[#37b979]' : 'bg-[#dfe8f3]'}`} />
-            </div>
-            <p className="mt-3 text-xs leading-5 text-[#8192a8]">One contact has approved. This is a simulated workflow for the prototype.</p>
-            <button onClick={() => setApproved(2)} className="mt-3 text-xs font-semibold text-[#1463ff]">
-              Simulate second approval
-            </button>
-          </div>
-          <button className="mt-6 flex w-full items-center justify-center gap-2 text-sm font-semibold text-[#1463ff]">
-            <FileKey2 className="size-4" /> Use a recovery code instead
-          </button>
+              <Button type="submit" disabled={busy} className="w-full">
+                {busy ? 'Verifying...' : 'Verify Recovery PIN'} <ArrowRight className="size-4" />
+              </Button>
+            </form>
+          )}
         </div>
       </main>
     </div>
@@ -1441,15 +2869,85 @@ const protectedRoutes = [
 
 export default function RetraceApp({ initialRoute }: { initialRoute?: string }) {
   const pathname = usePathname()
+  const router = useRouter()
   const route = initialRoute || pathname
 
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
+  const [profile, setProfile] = useState<PublicProfile | null>(null)
+  const [profileLoading, setProfileLoading] = useState(false)
+  const [profileError, setProfileError] = useState<string | null>(null)
+
+  const [devices, setDevices] = useState<Device[]>([])
+  const [contacts, setContacts] = useState<TrustedContact[]>([])
+  const [recoveryRequests, setRecoveryRequests] = useState<RecoveryRequest[]>([])
+  const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([])
+  const [dataLoading, setDataLoading] = useState(false)
+  const [dataError, setDataError] = useState<string | null>(null)
+
+  const loadProfile = useCallback(async (userId: string, isCancelled?: () => boolean) => {
+    setProfileLoading(true)
+    setProfileError(null)
+    try {
+      const fetched = await getUserProfile(userId)
+      if (isCancelled?.()) return
+      setProfile(fetched)
+      if (!fetched) {
+        setProfileError('Profile record not found for this account.')
+      }
+    } catch (err: unknown) {
+      if (isCancelled?.()) return
+      const msg = err instanceof Error ? err.message : 'Unable to fetch your profile.'
+      setProfileError(msg)
+      setProfile(null)
+    } finally {
+      if (!isCancelled?.()) {
+        setProfileLoading(false)
+      }
+    }
+  }, [])
+
+  const loadData = useCallback(async (userId: string, isCancelled?: () => boolean) => {
+    setDataLoading(true)
+    setDataError(null)
+    try {
+      const [devs, conts, reqs, logs] = await Promise.all([
+        getDevices(userId),
+        getTrustedContacts(userId),
+        getRecoveryRequests(userId),
+        getActivityLogs(userId),
+      ])
+      if (isCancelled?.()) return
+      setDevices(devs)
+      setContacts(conts)
+      setRecoveryRequests(reqs)
+      setActivityLogs(logs)
+    } catch (err: unknown) {
+      if (isCancelled?.()) return
+      const msg = err instanceof Error ? err.message : 'Unable to fetch account records.'
+      setDataError(msg)
+    } finally {
+      if (!isCancelled?.()) {
+        setDataLoading(false)
+      }
+    }
+  }, [])
+
+  const refreshProfile = useCallback(async () => {
+    if (user?.id) {
+      await loadProfile(user.id)
+    }
+  }, [user?.id, loadProfile])
+
+  const refreshData = useCallback(async () => {
+    if (user?.id) {
+      await loadData(user.id)
+    }
+  }, [user?.id, loadData])
 
   useEffect(() => {
     let mounted = true
 
-    // Check initial active session
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (mounted) {
         setUser(session?.user ?? null)
@@ -1461,7 +2959,6 @@ export default function RetraceApp({ initialRoute }: { initialRoute?: string }) 
       }
     })
 
-    // Listen to real-time auth changes across tabs and actions
     const {
       data: { subscription }
     } = supabase.auth.onAuthStateChange((_event, session) => {
@@ -1477,14 +2974,67 @@ export default function RetraceApp({ initialRoute }: { initialRoute?: string }) 
     }
   }, [])
 
+  useEffect(() => {
+    let cancelled = false
+
+    if (!user?.id) {
+      setProfile(null)
+      setProfileError(null)
+      setProfileLoading(false)
+      setDevices([])
+      setContacts([])
+      setRecoveryRequests([])
+      setActivityLogs([])
+      setDataError(null)
+      setDataLoading(false)
+      return
+    }
+
+    loadProfile(user.id, () => cancelled)
+    loadData(user.id, () => cancelled)
+
+    return () => {
+      cancelled = true
+    }
+  }, [user?.id, loadProfile, loadData])
+
+  useEffect(() => {
+    if (!loading && user && (route === '/login' || route === '/register')) {
+      router.replace('/dashboard')
+    }
+  }, [loading, user, route, router])
+
   const handleSignOut = async () => {
     await signOut()
     setUser(null)
+    setProfile(null)
+    setProfileError(null)
+    setDevices([])
+    setContacts([])
+    setRecoveryRequests([])
+    setActivityLogs([])
+    setDataError(null)
   }
 
   const isProtectedRoute = protectedRoutes.includes(route)
 
-  // Calmer loader when verifying session on a protected route
+  const authValue: AuthContextType = {
+    user,
+    profile,
+    devices,
+    contacts,
+    recoveryRequests,
+    activityLogs,
+    loading,
+    profileLoading,
+    dataLoading,
+    profileError,
+    dataError,
+    refreshProfile,
+    refreshData,
+    signOut: handleSignOut,
+  }
+
   if (loading && isProtectedRoute) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#f7faff]">
@@ -1498,17 +3048,16 @@ export default function RetraceApp({ initialRoute }: { initialRoute?: string }) 
     )
   }
 
-  // Client-side route protection: Redirect unauthenticated users
   if (!loading && !user && isProtectedRoute) {
     return (
-      <AuthContext.Provider value={{ user, loading, signOut: handleSignOut }}>
+      <AuthContext.Provider value={authValue}>
         <AuthPage type="login" redirectMessage="Please sign in to access your recovery command center." />
       </AuthContext.Provider>
     )
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, signOut: handleSignOut }}>
+    <AuthContext.Provider value={authValue}>
       {route === '/' && <Landing />}
       {route === '/dashboard' && <Dashboard />}
       {route === '/devices' && <Devices />}

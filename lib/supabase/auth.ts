@@ -78,3 +78,28 @@ export async function getUser(): Promise<User | null> {
   }
   return data.user
 }
+
+/**
+ * Send a Supabase password reset email for account recovery.
+ */
+export async function sendPasswordReset(email: string, redirectTo?: string) {
+  const { error } = await supabase.auth.resetPasswordForEmail(
+    email.trim(),
+    redirectTo ? { redirectTo } : undefined
+  )
+  if (error) {
+    throw error
+  }
+}
+
+/**
+ * Update the authenticated user's display name in Supabase Auth metadata.
+ */
+export async function updateAuthFullName(fullName: string) {
+  const { error } = await supabase.auth.updateUser({
+    data: { full_name: fullName.trim() },
+  })
+  if (error) {
+    throw error
+  }
+}
