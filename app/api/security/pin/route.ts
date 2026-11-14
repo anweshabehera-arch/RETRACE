@@ -5,6 +5,7 @@ import {
   isValidRecoveryPinFormat,
   verifyRecoveryPinHash,
 } from '@/lib/supabase/server-auth'
+import { notifyAccountSecurityEvent } from '@/lib/email/notifications'
 
 export async function POST(request: Request) {
   try {
@@ -45,6 +46,17 @@ export async function POST(request: Request) {
       title: 'Recovery PIN configured',
       description: 'Recovery PIN was securely hashed and saved to your identity.',
       category: 'Security',
+    })
+
+    // Dispatch email alert to owner regarding PIN configuration
+    notifyAccountSecurityEvent({
+      client: auth.supabase,
+      userId: auth.user.id,
+      eventType: 'pin_configured',
+      detail: 'Your 6-digit Recovery PIN was securely saved and updated.',
+      userEmail: auth.user.email,
+    }).catch((err) => {
+      console.error('[PIN Config Security Email Error]', err)
     })
 
     return NextResponse.json({ success: true, hasRecoveryPin: true })

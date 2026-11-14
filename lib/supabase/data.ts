@@ -3,6 +3,7 @@ import { getSession, updateAuthFullName } from './auth'
 import type {
   ActivityCategory,
   ActivityLog,
+  AnonymousSighting,
   Device,
   DeviceStatus,
   RecoveryRequest,
@@ -442,6 +443,56 @@ export async function deleteTrustedContact(
   })
 }
 
+export async function requestContactVerificationOtp(contactId: string) {
+  const token = await getAccessTokenOrThrow()
+  const res = await fetch('/api/contacts/otp', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ contactId }),
+  })
+
+  const json = (await res.json().catch(() => ({}))) as {
+    success?: boolean
+    error?: string
+    message?: string
+    expiresAt?: number
+    configured?: boolean
+  }
+
+  if (!res.ok) {
+    throw new Error(json.error || 'Failed to dispatch verification code.')
+  }
+
+  return json
+}
+
+export async function submitContactVerificationOtp(contactId: string, otp: string) {
+  const token = await getAccessTokenOrThrow()
+  const res = await fetch('/api/contacts/otp', {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ contactId, otp }),
+  })
+
+  const json = (await res.json().catch(() => ({}))) as {
+    verified?: boolean
+    error?: string
+    message?: string
+  }
+
+  if (!res.ok) {
+    throw new Error(json.error || 'Verification failed. Please check the code.')
+  }
+
+  return json
+}
+
 // ============================================================================
 // Recovery Requests
 // ============================================================================
@@ -586,5 +637,440 @@ export function getRecoveryOverview(
     protectedDevices,
     protectedCount: protectedDevices.length,
     recoveryStatus,
+  }
+}
+
+// ============================================================================
+// Independent Account Recovery API Client
+// ============================================================================
+
+export interface IndependentRecoverySession {
+  userId: string
+  recoveryId: string
+  fullName: string
+  expiresAt: number
+}
+
+export async function loginWithRecoveryCredentials(recoveryId: string, recoveryPin: string) {
+  const res = await fetch('/api/recovery/authenticate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ recoveryId, recoveryPin }),
+  })
+
+  const json = (await res.json().catch(() => ({}))) as {
+    success?: boolean
+    recoveryToken?: string
+    user?: { id: string; recoveryId: string; fullName: string }
+    expiresIn?: string
+    error?: string
+    remainingAttempts?: number
+  }
+
+  if (!res.ok || !json.recoveryToken) {
+    throw new Error(json.error || 'Recovery verification failed.')
+  }
+
+  return json
+}
+
+export async function fetchRecoverySessionData(token: string) {
+  const res = await fetch('/api/recovery/session', {
+    method: 'GET',
+    headers: {
+      Authorization: `RecoveryToken ${token}`,
+    },
+  })
+
+  const json = (await res.json().catch(() => ({}))) as {
+    session?: IndependentRecoverySession
+    profile?: any
+    devices?: Device[]
+    contacts?: TrustedContact[]
+    recoveryRequests?: RecoveryRequest[]
+    activityLogs?: ActivityLog[]
+    error?: string
+  }
+
+  if (!res.ok) {
+    throw new Error(json.error || 'Failed to load recovery session records.')
+  }
+
+  return json
+}
+
+export async function executeRecoverySessionAction(
+  token: string,
+  action: 'start_recovery' | 'resolve_recovery',
+  payload: { deviceId?: string; requestId?: string; notes?: string }
+) {
+  const res = await fetch('/api/recovery/session', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `RecoveryToken ${token}`,
+    },
+    body: JSON.stringify({ action, ...payload }),
+  })
+
+  const json = (await res.json().catch(() => ({}))) as {
+    success?: boolean
+    message?: string
+    error?: string
+  }
+
+  if (!res.ok) {
+    throw new Error(json.error || 'Failed to update recovery action.')
+  }
+
+  return json
+}
+
+export async function logoutRecoverySession(token: string) {
+  await fetch('/api/recovery/session', {
+    method: 'DELETE',
+    headers: {
+      Authorization: `RecoveryToken ${token}`,
+    },
+  }).catch(() => {})
+}
+
+// ============================================================================
+// Onboarding Data Persistence Helpers (survives email confirmation)
+// NOTE: Recovery PIN is NEVER stored in localStorage/sessionStorage.
+// ============================================================================
+
+export interface PendingOnboardingData {
+  email: string
+  backupPhone?: string
+  deviceName?: string
+  deviceType?: string
+  contactName?: string
+  contactPhone?: string
+  savedAt: number
+}
+
+const ONBOARDING_KEY_PREFIX = 'retrace_pending_onboarding_'
+
+export function savePendingOnboarding(data: Omit<PendingOnboardingData, 'savedAt'>) {
+  if (typeof window === 'undefined') return
+  try {
+    const key = `${ONBOARDING_KEY_PREFIX}${data.email.trim().toLowerCase()}`
+    const payload: PendingOnboardingData = {
+      ...data,
+      savedAt: Date.now(),
+    }
+    // Explicit security check: never store recovery PIN in browser storage
+    delete (payload as any).recoveryPin
+    localStorage.setItem(key, JSON.stringify(payload))
+  } catch {}
+}
+
+export function getPendingOnboarding(email: string): PendingOnboardingData | null {
+  if (typeof window === 'undefined' || !email) return null
+  try {
+    const key = `${ONBOARDING_KEY_PREFIX}${email.trim().toLowerCase()}`
+    const raw = localStorage.getItem(key)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as PendingOnboardingData
+    // Sanitize any legacy cached PIN if found in storage
+    if ((parsed as any).recoveryPin) {
+      delete (parsed as any).recoveryPin
+      try {
+        localStorage.setItem(key, JSON.stringify(parsed))
+      } catch {}
+    }
+    // Keep valid for 48 hours
+    if (Date.now() - parsed.savedAt > 48 * 60 * 60 * 1000) {
+      localStorage.removeItem(key)
+      return null
+    }
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+export function clearPendingOnboarding(email: string) {
+  if (typeof window === 'undefined' || !email) return
+  try {
+    const key = `${ONBOARDING_KEY_PREFIX}${email.trim().toLowerCase()}`
+    localStorage.removeItem(key)
+  } catch {}
+}
+
+export async function applyPendingOnboardingIfAny(userId: string, email: string) {
+  const pending = getPendingOnboarding(email)
+  if (!pending) return false
+
+  let appliedAny = false
+
+  try {
+    // 1. Backup phone
+    if (pending.backupPhone?.trim()) {
+      await updateProfileDetails(userId, { backupPhone: pending.backupPhone.trim() }).catch(() => {})
+      appliedAny = true
+    }
+
+    // 2. Device (check for duplicate before creating)
+    if (pending.deviceName?.trim() && pending.deviceType?.trim()) {
+      const existing = await getDevices(userId).catch(() => [])
+      const alreadyHas = existing.some(
+        (d) => d.name.toLowerCase() === pending.deviceName!.trim().toLowerCase()
+      )
+      if (!alreadyHas) {
+        await createDevice(userId, {
+          name: pending.deviceName.trim(),
+          type: pending.deviceType.trim(),
+        }).catch(() => {})
+        appliedAny = true
+      }
+    }
+
+    // 3. Trusted Contact (check for duplicate before creating)
+    if (pending.contactName?.trim() && pending.contactPhone?.trim()) {
+      const existing = await getTrustedContacts(userId).catch(() => [])
+      const alreadyHas = existing.some(
+        (c) => c.phone.replace(/\D/g, '') === pending.contactPhone!.replace(/\D/g, '')
+      )
+      if (!alreadyHas) {
+        await createTrustedContact(userId, {
+          name: pending.contactName.trim(),
+          relation: 'Emergency Contact',
+          phone: pending.contactPhone.trim(),
+        }).catch(() => {})
+        appliedAny = true
+      }
+    }
+  } finally {
+    clearPendingOnboarding(email)
+  }
+
+  return appliedAny
+}
+
+// ============================================================================
+// Upgraded RETRACE AI Capabilities Client Methods
+// ============================================================================
+
+export interface PanicChecklistStep {
+  id: string
+  title: string
+  priority: string
+  description: string
+  completed: boolean
+  actionUrl?: string
+  actionLabel?: string
+}
+
+export async function activatePanicRecoveryMode(params: {
+  deviceId: string
+  latitude?: number | null
+  longitude?: number | null
+  locationName?: string | null
+  accuracy?: number | null
+  recoveryToken?: string | null
+}) {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (params.recoveryToken) {
+    headers['Authorization'] = `RecoveryToken ${params.recoveryToken}`
+  } else {
+    const session = await getSession()
+    if (session?.access_token) {
+      headers['Authorization'] = `Bearer ${session.access_token}`
+    }
+  }
+
+  const res = await fetch('/api/recovery/panic', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(params),
+  })
+
+  const json = (await res.json().catch(() => ({}))) as {
+    success?: boolean
+    error?: string
+    incidentId?: string
+    checklist?: PanicChecklistStep[]
+    notificationsDispatched?: number
+  }
+
+  if (!res.ok) {
+    throw new Error(json.error || 'Failed to activate panic mode.')
+  }
+
+  return json
+}
+
+export async function updatePanicChecklistStep(
+  deviceId: string,
+  stepId: string,
+  completed: boolean,
+  recoveryToken?: string | null
+) {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (recoveryToken) {
+    headers['Authorization'] = `RecoveryToken ${recoveryToken}`
+  } else {
+    const session = await getSession()
+    if (session?.access_token) {
+      headers['Authorization'] = `Bearer ${session.access_token}`
+    }
+  }
+
+  const res = await fetch('/api/recovery/panic', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ deviceId, stepId, completed }),
+  })
+
+  const json = (await res.json().catch(() => ({}))) as {
+    success?: boolean
+    steps?: PanicChecklistStep[]
+    error?: string
+  }
+
+  if (!res.ok) {
+    throw new Error(json.error || 'Failed to update checklist step.')
+  }
+
+  return json
+}
+
+export async function fetchTheftRiskAnalysis(deviceId?: string, recoveryToken?: string | null) {
+  const headers: Record<string, string> = {}
+  if (recoveryToken) {
+    headers['Authorization'] = `RecoveryToken ${recoveryToken}`
+  } else {
+    const session = await getSession()
+    if (session?.access_token) {
+      headers['Authorization'] = `Bearer ${session.access_token}`
+    }
+  }
+
+  const url = deviceId ? `/api/theft-detection?deviceId=${encodeURIComponent(deviceId)}` : '/api/theft-detection'
+  const res = await fetch(url, { method: 'GET', headers })
+  const json = (await res.json().catch(() => ({}))) as any
+
+  if (!res.ok) {
+    throw new Error(json.error || 'Failed to analyze theft risk.')
+  }
+
+  return json
+}
+
+export async function fetchCommunityBeaconStatus(beaconToken: string) {
+  const res = await fetch(`/api/community/sighting?beacon=${encodeURIComponent(beaconToken)}`)
+  const json = (await res.json().catch(() => ({}))) as any
+  if (!res.ok) {
+    throw new Error(json.error || json.message || 'Beacon not found.')
+  }
+  return json
+}
+
+export async function submitAnonymousCommunitySighting(params: {
+  beaconToken: string
+  latitude: number
+  longitude: number
+  accuracy?: number | null
+  notes?: string | null
+}) {
+  const res = await fetch('/api/community/sighting', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  const json = (await res.json().catch(() => ({}))) as any
+  if (!res.ok) {
+    throw new Error(json.error || 'Failed to submit sighting.')
+  }
+  return json
+}
+
+export async function requestAiRecoveryPlaybook(params: {
+  deviceId: string
+  deviceName?: string
+  deviceType?: string
+  theftScore?: number
+  theftLevel?: string
+  recoveryToken?: string | null
+}) {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (params.recoveryToken) {
+    headers['Authorization'] = `RecoveryToken ${params.recoveryToken}`
+  } else {
+    const session = await getSession()
+    if (session?.access_token) {
+      headers['Authorization'] = `Bearer ${session.access_token}`
+    }
+  }
+
+  const res = await fetch('/api/ai-assistant', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(params),
+  })
+
+  const json = (await res.json().catch(() => ({}))) as any
+  if (!res.ok) {
+    throw new Error(json.error || 'Failed to generate AI recovery playbook.')
+  }
+  return json
+}
+
+export async function initiateGuardianQuorum(
+  requestId: string,
+  actionType: string,
+  notes?: string,
+  recoveryToken?: string | null
+) {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (recoveryToken) {
+    headers['Authorization'] = `RecoveryToken ${recoveryToken}`
+  } else {
+    const session = await getSession()
+    if (session?.access_token) {
+      headers['Authorization'] = `Bearer ${session.access_token}`
+    }
+  }
+
+  const res = await fetch('/api/contacts/quorum', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ requestId, actionType, notes }),
+  })
+
+  const json = (await res.json().catch(() => ({}))) as any
+  if (!res.ok) {
+    throw new Error(json.error || 'Failed to initiate guardian quorum.')
+  }
+  return json
+}
+
+export async function submitGuardianVote(voteToken: string, decision: 'approve' | 'reject', comment?: string) {
+  const res = await fetch('/api/contacts/quorum', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ voteToken, decision, comment }),
+  })
+  const json = (await res.json().catch(() => ({}))) as any
+  if (!res.ok) {
+    throw new Error(json.error || 'Failed to submit guardian vote.')
+  }
+  return json
+}
+
+export async function fetchDeviceSightings(deviceId: string): Promise<AnonymousSighting[]> {
+  try {
+    const { data, error } = await supabase
+      .from('anonymous_sightings')
+      .select('*')
+      .eq('device_id', deviceId)
+      .order('reported_at', { ascending: false })
+
+    if (error || !data) return []
+    return data as AnonymousSighting[]
+  } catch {
+    return []
   }
 }

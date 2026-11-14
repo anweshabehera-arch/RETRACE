@@ -1,5 +1,9 @@
 import { NextResponse } from 'next/server'
 import { getAuthenticatedServerClient } from '@/lib/supabase/server-auth'
+import {
+  notifyRecoveryIncidentCreated,
+  notifyRecoveryCompleted,
+} from '@/lib/email/notifications'
 
 export async function POST(request: Request) {
   try {
@@ -112,6 +116,18 @@ export async function POST(request: Request) {
       category: 'Recovery',
     })
 
+    // Dispatch email notifications to owner and verified trusted contacts
+    notifyRecoveryIncidentCreated({
+      client: auth.supabase,
+      userId: auth.user.id,
+      deviceId,
+      incidentId: createdRequest.id,
+      notes: notes || null,
+      userEmail: auth.user.email,
+    }).catch((err) => {
+      console.error('[Recovery Notification Error]', err)
+    })
+
     return NextResponse.json({ recoveryRequest: createdRequest })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unexpected server error.'
@@ -203,6 +219,18 @@ export async function PATCH(request: Request) {
           ? `${deviceName} was marked as recovered, incident closed, and protection restored.`
           : `Recovery incident for ${deviceName} was cancelled and status restored to protected.`,
       category: 'Recovery',
+    })
+
+    // Dispatch recovery completion email to owner and verified guardians
+    notifyRecoveryCompleted({
+      client: auth.supabase,
+      userId: auth.user.id,
+      deviceId: reqRow.device_id,
+      requestId,
+      action: action === 'recover' ? 'recover' : 'cancel',
+      userEmail: auth.user.email,
+    }).catch((err) => {
+      console.error('[Recovery Complete Notification Error]', err)
     })
 
     return NextResponse.json({ recoveryRequest: updatedRequest })

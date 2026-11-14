@@ -6,20 +6,22 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import type { User } from '@supabase/supabase-js'
 import {
   Activity, ArrowLeft, ArrowRight, Battery, Bell, Check, CheckCircle2, CircleHelp,
-  Clock3, CloudOff, ExternalLink, Eye, EyeOff, FileKey2, Fingerprint, Globe2,
+  Clock3, CloudOff, ExternalLink, Eye, EyeOff, FileKey2, Fingerprint, Flame, Globe2,
   Laptop, LockKeyhole, LogOut, MapPin, Menu, Navigation, Pencil,
-  Phone, Plus, QrCode, Radar, RefreshCw, Search, Send, Settings, Shield, ShieldCheck,
+  Phone, Plus, QrCode, Radar, Radio, RefreshCw, Search, Send, Settings, Shield, ShieldCheck,
   Smartphone, Sparkles, Trash2, UserRound, UsersRound, Wifi, X, Zap
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase/client'
 import { sendPasswordReset, signIn, signOut, signUp } from '@/lib/supabase/auth'
 import { getUserProfile, maskPhoneNumber, type PublicProfile } from '@/lib/supabase/profile'
 import {
+  applyPendingOnboardingIfAny,
   createDevice,
   createRecoveryRequestServer,
   createTrustedContact,
   deleteDevice,
   deleteTrustedContact,
+  fetchRecoverySessionData,
   formatShortDate,
   formatTimestamp,
   getActivityLogs,
@@ -28,15 +30,30 @@ import {
   getRecoveryOverview,
   getRecoveryRequests,
   getTrustedContacts,
+  loginWithRecoveryCredentials,
+  logoutRecoverySession,
+  requestContactVerificationOtp,
   resolveRecoveryRequestServer,
+  savePendingOnboarding,
   saveRecoveryPinServer,
+  submitContactVerificationOtp,
   updateDeviceLocation,
   updateDeviceStatus,
   updateProfileDetails,
   updateTrustedContact,
   verifyRecoveryPinServer,
+  fetchDeviceSightings,
+  type IndependentRecoverySession,
 } from '@/lib/supabase/data'
-import type { ActivityLog, Device, RecoveryRequest, TrustedContact } from '@/lib/supabase/types'
+import type { ActivityLog, AnonymousSighting, Device, RecoveryRequest, TrustedContact } from '@/lib/supabase/types'
+import InteractiveMap from '@/components/interactive-map'
+import TheftDetectionCard from '@/components/theft-detection-card'
+import PanicModal from '@/components/panic-modal'
+import AiRecoveryAssistant from '@/components/ai-recovery-assistant'
+import CommunityNetworkCard from '@/components/community-network-card'
+import QuorumModal from '@/components/quorum-modal'
+import SightingPortal from '@/components/sighting-portal'
+import GuardianPortal from '@/components/guardian-portal'
 
 const nav = [
   ['Overview', '/dashboard', Activity],
@@ -60,9 +77,12 @@ interface AuthContextType {
   dataLoading: boolean
   profileError: string | null
   dataError: string | null
+  recoverySession: IndependentRecoverySession | null
+  isRecoveryMode: boolean
   refreshProfile: () => Promise<void>
   refreshData: () => Promise<void>
   signOut: () => Promise<void>
+  exitRecoverySession: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextType>({
@@ -77,9 +97,12 @@ const AuthContext = createContext<AuthContextType>({
   dataLoading: false,
   profileError: null,
   dataError: null,
+  recoverySession: null,
+  isRecoveryMode: false,
   refreshProfile: async () => {},
   refreshData: async () => {},
   signOut: async () => {},
+  exitRecoverySession: async () => {},
 })
 
 export function useAuth() {
@@ -345,6 +368,7 @@ function AppShell({ children, title, description }: { children: React.ReactNode;
   const [mobile, setMobile] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [notifOpen, setNotifOpen] = useState(false)
+  const [panicOpen, setPanicOpen] = useState(false)
   const {
     user,
     profile,
@@ -356,9 +380,12 @@ function AppShell({ children, title, description }: { children: React.ReactNode;
     dataError,
     profileLoading,
     dataLoading,
+    recoverySession,
+    isRecoveryMode,
     refreshProfile,
     refreshData,
     signOut,
+    exitRecoverySession,
   } = useAuth()
 
   const activeDeviceIds = useMemo(
@@ -449,14 +476,34 @@ function AppShell({ children, title, description }: { children: React.ReactNode;
           </Button>
         </div>
         <button
-          onClick={handleSignOut}
+          onClick={isRecoveryMode ? exitRecoverySession : handleSignOut}
           className="mt-5 flex w-full items-center gap-3 px-3 text-sm font-medium text-[#71839a] transition hover:text-[#c53d47]"
         >
-          <LogOut className="size-4" /> Sign out
+          <LogOut className="size-4" /> {isRecoveryMode ? 'Exit recovery mode' : 'Sign out'}
         </button>
       </aside>
 
       <div className="lg:pl-64">
+        {isRecoveryMode && recoverySession && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#14325a] bg-[#0b1b35] px-5 py-2.5 text-xs text-white lg:px-10">
+            <div className="flex items-center gap-2">
+              <span className="size-2 rounded-full bg-[#37b979] animate-pulse" />
+              <span className="font-semibold text-[#78a9ff]">Independent Recovery Session Active</span>
+              <span className="hidden text-[#aebdd2] sm:inline">
+                · Identity: {recoverySession.recoveryId} ({recoverySession.fullName})
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-[11px] text-[#78a9ff]">Session active (2 hours)</span>
+              <button
+                onClick={exitRecoverySession}
+                className="rounded-lg bg-white/10 px-2.5 py-1 text-xs font-semibold text-white transition hover:bg-white/20"
+              >
+                Exit Session
+              </button>
+            </div>
+          </div>
+        )}
         <header className="sticky top-0 z-30 flex h-[76px] items-center justify-between border-b border-[#e5edf6] bg-white/90 px-5 backdrop-blur lg:px-10">
           <button className="rounded-lg p-2 lg:hidden" onClick={() => setMobile(true)} aria-label="Open navigation">
             <Menu className="size-5" />
@@ -535,6 +582,16 @@ function AppShell({ children, title, description }: { children: React.ReactNode;
               )}
             </div>
 
+            {devices.length > 0 && (
+              <button
+                onClick={() => setPanicOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-[#ffcdd2] bg-[#ffebee] px-3 py-1.5 text-xs font-bold text-[#d32f2f] transition hover:bg-[#ffcdd2]"
+              >
+                <Flame className="size-3.5 animate-pulse text-[#d32f2f]" />
+                <span className="hidden sm:inline">Panic Mode</span>
+              </button>
+            )}
+
             <div className="grid size-9 place-items-center rounded-full bg-[#dce8ff] text-xs font-bold text-[#3567bc]">
               {userInitials}
             </div>
@@ -561,6 +618,15 @@ function AppShell({ children, title, description }: { children: React.ReactNode;
           {children}
         </main>
       </div>
+
+      {devices.length > 0 && (
+        <PanicModal
+          device={devices.find((d) => d.status === 'lost') || devices[0]}
+          isOpen={panicOpen}
+          onClose={() => setPanicOpen(false)}
+          onActivated={() => refreshData()}
+        />
+      )}
     </div>
   )
 }
@@ -591,6 +657,34 @@ function Dashboard() {
   const { user, profile, devices, contacts, recoveryRequests, activityLogs, profileLoading, dataLoading, refreshData } = useAuth()
   const [actionBusy, setActionBusy] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [geoBusy, setGeoBusy] = useState(false)
+  const [dashboardPanicOpen, setDashboardPanicOpen] = useState(false)
+  const [deviceSightings, setDeviceSightings] = useState<AnonymousSighting[]>([])
+
+  const handleBrowserGeolocationCheckIn = () => {
+    if (!user?.id || !primaryDevice) return
+    if (typeof navigator === 'undefined' || !navigator.geolocation) return
+    setGeoBusy(true)
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const lat = Number(pos.coords.latitude.toFixed(5))
+          const lng = Number(pos.coords.longitude.toFixed(5))
+          const label = `Checked in (${lat}, ${lng})`
+          await updateDeviceLocation(user.id, primaryDevice.id, primaryDevice.name, {
+            locationName: label,
+            latitude: lat,
+            longitude: lng,
+          })
+          await refreshData()
+        } catch {} finally {
+          setGeoBusy(false)
+        }
+      },
+      () => setGeoBusy(false),
+      { enableHighAccuracy: false, timeout: 10000, maximumAge: 0 }
+    )
+  }
 
   const displayName = useMemo(() => {
     return profile?.full_name || user?.user_metadata?.full_name || (user?.email ? user.email.split('@')[0] : 'User')
@@ -613,6 +707,22 @@ function Dashboard() {
   const primaryDevice = useMemo(() => {
     return lostDevices[0] || devices[0] || null
   }, [lostDevices, devices])
+
+  useEffect(() => {
+    if (!primaryDevice?.id) {
+      setDeviceSightings([])
+      return
+    }
+    let active = true
+    fetchDeviceSightings(primaryDevice.id)
+      .then((res) => {
+        if (active) setDeviceSightings(res)
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
+  }, [primaryDevice?.id])
 
   const primaryEffectiveStatus = useMemo(
     () => (primaryDevice ? getEffectiveDeviceStatus(primaryDevice, activeDeviceIds) : null),
@@ -661,8 +771,37 @@ function Dashboard() {
               : 'Your recovery identity is active and ready.'}
           </p>
         </div>
-        <Button href="/recovery"><Radar className="size-4" /> Start recovery</Button>
+        <div className="flex flex-wrap items-center gap-2">
+          {primaryDevice && (
+            <button
+              onClick={() => setDashboardPanicOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-[#ffcdd2] bg-[#ffebee] px-4 py-2 text-xs font-bold text-[#d32f2f] shadow-sm hover:bg-[#ffcdd2] transition"
+            >
+              <Flame className="size-4 animate-pulse text-[#d32f2f]" />
+              Emergency Panic Mode
+            </button>
+          )}
+          <Button href="/recovery"><Radar className="size-4" /> Start recovery</Button>
+        </div>
       </div>
+
+      {primaryEffectiveStatus === 'lost' && primaryDevice && (
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#ffcdd2] bg-[#ffebee] p-4 text-[#b71c1c]">
+          <div className="flex items-center gap-2.5">
+            <Flame className="size-5 animate-pulse text-[#d32f2f]" />
+            <div>
+              <p className="font-bold text-sm">Panic Recovery Mode Active for {primaryDevice.name}</p>
+              <p className="text-xs text-[#c62828]">Device flagged lost · Emergency checklist & guardian alerts deployed</p>
+            </div>
+          </div>
+          <button
+            onClick={() => setDashboardPanicOpen(true)}
+            className="rounded-xl bg-[#d32f2f] px-3.5 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-[#b71c1c] transition"
+          >
+            Open Emergency Playbook
+          </button>
+        </div>
+      )}
 
       {actionError && (
         <div className="mt-5 rounded-xl border border-[#fcdada] bg-[#fff5f5] p-3.5 text-xs font-medium text-[#c53030]">
@@ -820,29 +959,36 @@ function Dashboard() {
               Check in location
             </Button>
           </div>
-          <div
-            className="relative mt-5 h-52 overflow-hidden rounded-xl bg-[#dceaf9]"
-            style={{
-              backgroundImage:
-                'linear-gradient(32deg, transparent 45%, #b7cce4 46%, #b7cce4 48%, transparent 49%), linear-gradient(120deg, transparent 40%, #c5d8ed 41%, #c5d8ed 43%, transparent 44%)'
-            }}
-          >
-            <div className="absolute left-[48%] top-[45%] grid size-16 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full bg-[#1463ff]/15">
-              <span className="grid size-8 place-items-center rounded-full bg-[#1463ff] text-white shadow-lg">
-                <MapPin className="size-4" />
-              </span>
-            </div>
-            <span className="absolute bottom-3 left-3 rounded-lg bg-white/90 px-2.5 py-1.5 text-xs font-semibold text-[#27405e]">
-              {!primaryDevice
-                ? 'No location recorded'
-                : primaryDevice.last_location_name === 'Unknown location'
-                ? 'Location unavailable'
-                : primaryDevice.last_location_name}
-            </span>
-          </div>
+          <InteractiveMap
+            device={primaryDevice}
+            sightings={deviceSightings}
+            className="mt-5 h-64"
+            onCheckInRequested={handleBrowserGeolocationCheckIn}
+            isCheckingIn={geoBusy}
+          />
         </section>
         <ActivityList logs={activityLogs} loading={dataLoading} />
       </div>
+
+      {primaryDevice && (
+        <>
+          <div className="mt-6 grid gap-6 lg:grid-cols-2">
+            <TheftDetectionCard deviceId={primaryDevice.id} />
+            <AiRecoveryAssistant device={primaryDevice} />
+          </div>
+
+          <div className="mt-6">
+            <CommunityNetworkCard device={primaryDevice} />
+          </div>
+
+          <PanicModal
+            device={primaryDevice}
+            isOpen={dashboardPanicOpen}
+            onClose={() => setDashboardPanicOpen(false)}
+            onActivated={() => refreshData()}
+          />
+        </>
+      )}
     </AppShell>
   )
 }
@@ -889,7 +1035,7 @@ function ActivityList({ logs, loading }: { logs: ActivityLog[]; loading: boolean
 }
 
 function Recovery() {
-  const { user, devices, recoveryRequests, dataLoading, refreshData } = useAuth()
+  const { user, devices, contacts, recoveryRequests, dataLoading, refreshData } = useAuth()
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('')
   const [notes, setNotes] = useState('')
   const [busy, setBusy] = useState(false)
@@ -897,6 +1043,9 @@ function Recovery() {
   const [manualLocationOpen, setManualLocationOpen] = useState(false)
   const [manualLocation, setManualLocation] = useState('')
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [panicOpen, setPanicOpen] = useState(false)
+  const [quorumOpen, setQuorumOpen] = useState(false)
+  const [selectedDeviceSightings, setSelectedDeviceSightings] = useState<AnonymousSighting[]>([])
 
   useEffect(() => {
     if (!selectedDeviceId && devices.length > 0) {
@@ -909,6 +1058,22 @@ function Recovery() {
     () => devices.find((d) => d.id === selectedDeviceId) || devices[0] || null,
     [devices, selectedDeviceId]
   )
+
+  useEffect(() => {
+    if (!selectedDevice?.id) {
+      setSelectedDeviceSightings([])
+      return
+    }
+    let active = true
+    fetchDeviceSightings(selectedDevice.id)
+      .then((res) => {
+        if (active) setSelectedDeviceSightings(res)
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
+  }, [selectedDevice?.id])
 
   const activeRequest = useMemo(
     () =>
@@ -1033,7 +1198,18 @@ function Recovery() {
               Create and manage real recovery incidents backed by your Supabase database.
             </p>
           </div>
-          <Button href="/dashboard" variant="outline"><ArrowLeft className="size-4" /> Back to overview</Button>
+          <div className="flex flex-wrap items-center gap-2">
+            {selectedDevice && (
+              <button
+                onClick={() => setPanicOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-[#ffcdd2] bg-[#ffebee] px-4 py-2 text-xs font-bold text-[#d32f2f] shadow-sm hover:bg-[#ffcdd2] transition"
+              >
+                <Flame className="size-4 animate-pulse text-[#d32f2f]" />
+                Emergency Panic Mode
+              </button>
+            )}
+            <Button href="/dashboard" variant="outline"><ArrowLeft className="size-4" /> Back to overview</Button>
+          </div>
         </div>
 
         {feedback && (
@@ -1138,6 +1314,13 @@ function Recovery() {
                         <Button
                           variant="outline"
                           className="flex-1"
+                          onClick={() => setQuorumOpen(true)}
+                        >
+                          <UsersRound className="size-4 text-[#1463ff]" /> Guardian Quorum
+                        </Button>
+                        <Button
+                          variant="outline"
+                          className="flex-1"
                           disabled={busy}
                           onClick={() => handleResolveRequest(activeRequest.id, 'cancel')}
                         >
@@ -1188,35 +1371,61 @@ function Recovery() {
                 )}
               </div>
 
-              <div
-                className="mt-5 h-52 rounded-xl bg-[#dceaf9]"
-                style={{
-                  backgroundImage:
-                    'linear-gradient(34deg, transparent 45%, #b7cce4 46%, #b7cce4 48%, transparent 49%), linear-gradient(110deg, transparent 44%, #c5d8ed 45%, #c5d8ed 47%, transparent 48%)'
-                }}
-              >
-                <div className="flex h-full flex-col items-center justify-center p-4 text-center">
-                  <div className="grid size-14 place-items-center rounded-full bg-[#1463ff]/15">
-                    <span className="grid size-9 place-items-center rounded-full bg-[#1463ff] text-white">
-                      <MapPin className="size-5" />
-                    </span>
-                  </div>
-                  {selectedDevice?.latitude !== null && selectedDevice?.longitude !== null && (
-                    <span className="mt-3 rounded-lg bg-white/90 px-3 py-1 text-xs font-semibold text-[#27405e] shadow-xs">
-                      {selectedDevice?.latitude}, {selectedDevice?.longitude}
-                    </span>
-                  )}
+              <InteractiveMap
+                device={selectedDevice}
+                sightings={selectedDeviceSightings}
+                className="mt-5 h-72"
+                onCheckInRequested={handleBrowserGeolocationCheckIn}
+                isCheckingIn={geoBusy}
+              />
+
+              <div className="mt-4 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-semibold">
+                    {!selectedDevice || selectedDevice.last_location_name === 'Unknown location'
+                      ? 'Verified location unavailable — no check-in recorded yet'
+                      : selectedDevice.last_location_name}
+                  </p>
+                  <p className="mt-0.5 text-xs text-[#8192a8]">
+                    {selectedDevice ? `Hardware check-in: ${formatTimestamp(selectedDevice.last_seen_at)}` : 'Select a device'}
+                  </p>
                 </div>
+                {selectedDevice?.latitude !== null && selectedDevice?.latitude !== undefined && (
+                  <span className="rounded bg-[#e8f5e9] px-2 py-0.5 text-[11px] font-bold text-[#2e7d32]">
+                    Verified GPS
+                  </span>
+                )}
               </div>
 
-              <p className="mt-4 text-sm font-semibold">
-                {!selectedDevice || selectedDevice.last_location_name === 'Unknown location'
-                  ? 'Location unavailable — no check-in recorded yet'
-                  : selectedDevice.last_location_name}
-              </p>
-              <p className="mt-1 text-xs text-[#8192a8]">
-                {selectedDevice ? `Last updated: ${formatTimestamp(selectedDevice.last_seen_at)}` : 'Select a device'}
-              </p>
+              {selectedDeviceSightings.length > 0 && (
+                <div className="mt-4 rounded-xl border border-[#fed7aa] bg-[#fff7ed] p-3 text-xs">
+                  <div className="flex items-center justify-between font-semibold text-[#9a3412]">
+                    <span className="flex items-center gap-1.5">
+                      <Radio className="size-3.5 text-[#ea580c]" />
+                      Unverified Community Sightings ({selectedDeviceSightings.length})
+                    </span>
+                    <span className="rounded bg-[#ffedd5] px-1.5 py-0.5 text-[10px] font-bold text-[#c2410c]">
+                      Crowd Reported
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-[#7c2d12]">
+                    Notice: These coordinates were submitted anonymously by finders scanning the device discovery beacon. They are displayed for lead investigation and are not verified by device hardware.
+                  </p>
+                  <div className="mt-2.5 divide-y divide-[#fed7aa]/50 border-t border-[#fed7aa] pt-2">
+                    {selectedDeviceSightings.slice(0, 3).map((s) => (
+                      <div key={s.id} className="flex items-center justify-between py-1 text-[11px]">
+                        <div>
+                          <span className="font-medium text-[#431407]">{s.notes || 'Community report'}</span>
+                          <span className="ml-1.5 font-mono text-[#9a3412]">
+                            [{s.latitude.toFixed(4)}, {s.longitude.toFixed(4)}]
+                          </span>
+                        </div>
+                        <span className="text-[#9a3412]">{formatTimestamp(s.reported_at)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {selectedDevice && (
                 <div className="mt-4 flex flex-wrap gap-2">
@@ -1289,13 +1498,39 @@ function Recovery() {
             </div>
           </section>
         )}
+
+        {selectedDevice && (
+          <div className="mt-8 space-y-6">
+            <div className="grid gap-6 lg:grid-cols-2">
+              <TheftDetectionCard deviceId={selectedDevice.id} />
+              <AiRecoveryAssistant device={selectedDevice} />
+            </div>
+            <CommunityNetworkCard device={selectedDevice} />
+          </div>
+        )}
+
+        {selectedDevice && (
+          <PanicModal
+            device={selectedDevice}
+            isOpen={panicOpen}
+            onClose={() => setPanicOpen(false)}
+            onActivated={() => refreshData()}
+          />
+        )}
+
+        <QuorumModal
+          isOpen={quorumOpen}
+          onClose={() => setQuorumOpen(false)}
+          recoveryRequest={activeRequest}
+          contacts={contacts}
+        />
       </div>
     </AppShell>
   )
 }
 
 function TrustedCircle() {
-  const { user, contacts, dataLoading, refreshData } = useAuth()
+  const { user, contacts, recoveryRequests, dataLoading, refreshData } = useAuth()
   const [formOpen, setFormOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [name, setName] = useState('')
@@ -1304,8 +1539,52 @@ function TrustedCircle() {
   const [email, setEmail] = useState('')
   const [busy, setBusy] = useState(false)
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [quorumOpen, setQuorumOpen] = useState(false)
+
+  // SMS OTP Verification modal state
+  const [verifyModalContact, setVerifyModalContact] = useState<TrustedContact | null>(null)
+  const [otpCode, setOtpCode] = useState('')
+  const [otpBusy, setOtpBusy] = useState(false)
+  const [otpFeedback, setOtpFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [otpSent, setOtpSent] = useState(false)
 
   const verifiedCount = useMemo(() => contacts.filter((c) => c.approved).length, [contacts])
+
+  const handleSendOtp = async (contactId: string) => {
+    setOtpFeedback(null)
+    setOtpBusy(true)
+    try {
+      const res = await requestContactVerificationOtp(contactId)
+      setOtpSent(true)
+      setOtpFeedback({ type: 'success', text: res.message || 'Verification code sent via SMS.' })
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unable to send SMS verification code.'
+      setOtpFeedback({ type: 'error', text: msg })
+    } finally {
+      setOtpBusy(false)
+    }
+  }
+
+  const handleVerifyOtp = async (contactId: string) => {
+    if (!otpCode.trim()) return
+    setOtpFeedback(null)
+    setOtpBusy(true)
+    try {
+      const res = await submitContactVerificationOtp(contactId, otpCode.trim())
+      setOtpFeedback({ type: 'success', text: res.message || 'Contact phone successfully verified!' })
+      setOtpCode('')
+      await refreshData()
+      setTimeout(() => {
+        setVerifyModalContact(null)
+        setOtpSent(false)
+      }, 1500)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Invalid verification code.'
+      setOtpFeedback({ type: 'error', text: msg })
+    } finally {
+      setOtpBusy(false)
+    }
+  }
 
   const resetForm = () => {
     setName('')
@@ -1376,15 +1655,25 @@ function TrustedCircle() {
             Manage the emergency contacts saved to your recovery identity.
           </p>
         </div>
-        <Button onClick={() => {
-          if (formOpen) resetForm()
-          else {
-            setEditingId(null)
-            setFormOpen(true)
-          }
-        }}>
-          <Plus className="size-4" /> {formOpen ? 'Cancel' : 'Add trusted contact'}
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          {recoveryRequests.some((r) => r.status === 'active') && (
+            <Button
+              variant="outline"
+              onClick={() => setQuorumOpen(true)}
+            >
+              <UsersRound className="size-4 text-[#1463ff]" /> Guardian Quorum
+            </Button>
+          )}
+          <Button onClick={() => {
+            if (formOpen) resetForm()
+            else {
+              setEditingId(null)
+              setFormOpen(true)
+            }
+          }}>
+            <Plus className="size-4" /> {formOpen ? 'Cancel' : 'Add trusted contact'}
+          </Button>
+        </div>
       </div>
 
       {feedback && (
@@ -1532,9 +1821,107 @@ function TrustedCircle() {
                   <span className={`size-1.5 rounded-full ${c.approved ? 'bg-[#37b979]' : 'bg-[#c6d0dc]'}`} />
                   {c.approved ? 'Verified' : 'Pending verification'}
                 </span>
+                {!c.approved && (
+                  <button
+                    onClick={() => {
+                      setVerifyModalContact(c)
+                      setOtpCode('')
+                      setOtpFeedback(null)
+                      setOtpSent(false)
+                    }}
+                    className="inline-flex items-center gap-1 rounded-lg bg-[#edf4ff] px-2.5 py-1 text-xs font-semibold text-[#1463ff] transition hover:bg-[#dce8ff]"
+                  >
+                    Verify (SMS)
+                  </button>
+                )}
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {verifyModalContact && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 backdrop-blur-xs">
+          <div className="w-full max-w-md rounded-3xl border border-[#dce8f6] bg-white p-6 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="grid size-10 place-items-center rounded-xl bg-[#edf4ff] text-[#1463ff]">
+                  <Phone className="size-5" />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-[#0b1b35]">Verify {verifyModalContact.name}</h3>
+                  <p className="text-xs text-[#71839a]">{maskPhoneNumber(verifyModalContact.phone)}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setVerifyModalContact(null)}
+                className="rounded-lg p-1 text-[#8192a8] hover:bg-[#f4f7fb]"
+              >
+                <X className="size-5" />
+              </button>
+            </div>
+
+            {otpFeedback && (
+              <div
+                className={`mt-4 rounded-xl border p-3 text-xs font-medium ${
+                  otpFeedback.type === 'success'
+                    ? 'border-[#b9ebd2] bg-[#eaf8f0] text-[#1f8056]'
+                    : 'border-[#fed7d7] bg-[#fff5f5] text-[#c53030]'
+                }`}
+              >
+                {otpFeedback.text}
+              </div>
+            )}
+
+            {!otpSent ? (
+              <div className="mt-5">
+                <p className="text-xs leading-5 text-[#60738c]">
+                  RETRACE dispatches a 6-digit cryptographic verification code to this phone number via SMS to confirm that your trusted contact can be reached during an emergency.
+                </p>
+                <div className="mt-5 flex gap-3">
+                  <Button
+                    onClick={() => handleSendOtp(verifyModalContact.id)}
+                    disabled={otpBusy}
+                    className="w-full"
+                  >
+                    {otpBusy ? 'Dispatching SMS...' : 'Send verification code'}
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-5 flex flex-col gap-3">
+                <label className="text-xs font-semibold text-[#0b1b35]">
+                  Enter 6-digit verification code
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={otpCode}
+                    onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
+                    placeholder="123456"
+                    className="mt-1.5 w-full rounded-xl border border-[#dce5f2] px-4 py-3 text-center text-lg font-bold tracking-[0.3em] outline-none focus:border-[#1463ff]"
+                  />
+                </label>
+                <div className="flex gap-2">
+                  <Button
+                    onClick={() => handleVerifyOtp(verifyModalContact.id)}
+                    disabled={otpBusy || otpCode.length < 6}
+                    className="flex-1"
+                  >
+                    {otpBusy ? 'Verifying...' : 'Confirm code'}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => handleSendOtp(verifyModalContact.id)}
+                    disabled={otpBusy}
+                    className="text-xs"
+                  >
+                    Resend
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -1551,6 +1938,13 @@ function TrustedCircle() {
           </div>
         </div>
       </div>
+
+      <QuorumModal
+        isOpen={quorumOpen}
+        onClose={() => setQuorumOpen(false)}
+        recoveryRequest={recoveryRequests.find((r) => r.status === 'active')}
+        contacts={contacts}
+      />
     </AppShell>
   )
 }
@@ -2000,6 +2394,13 @@ function Passport() {
             Do not store banking passwords, email passwords or sensitive financial credentials in RETRACE.
           </p>
         </section>
+
+        {devices.length > 0 && (
+          <div className="mt-6 space-y-6">
+            <AiRecoveryAssistant device={devices[0]} />
+            <CommunityNetworkCard device={devices[0]} />
+          </div>
+        )}
       </div>
     </AppShell>
   )
@@ -2321,6 +2722,12 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
   const [contactPhone, setContactPhone] = useState('')
   const [rememberMe, setRememberMe] = useState(true)
 
+  // Independent Recovery credentials state
+  const [recoveryIdInput, setRecoveryIdInput] = useState('')
+  const [recoveryPinInput, setRecoveryPinInput] = useState('')
+  const [recoveryShowPin, setRecoveryShowPin] = useState(false)
+  const [recoveryBusy, setRecoveryBusy] = useState(false)
+
   // Password reset inline state
   const [resetOpen, setResetOpen] = useState(false)
   const [resetEmail, setResetEmail] = useState('')
@@ -2330,6 +2737,36 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(redirectMessage || null)
   const [emailConfirmationNeeded, setEmailConfirmationNeeded] = useState(false)
+
+  const handleIndependentRecovery = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    const cleanId = recoveryIdInput.trim().toUpperCase()
+    const cleanPin = recoveryPinInput.trim()
+
+    if (!cleanId) {
+      setError('Please enter your RETRACE Recovery ID (e.g. RTR-8F2A-91C4-USER).')
+      return
+    }
+    if (!/^\d{4,6}$/.test(cleanPin)) {
+      setError('Please enter your 4 to 6 digit Recovery PIN.')
+      return
+    }
+
+    setRecoveryBusy(true)
+    try {
+      const res = await loginWithRecoveryCredentials(cleanId, cleanPin)
+      if (typeof window !== 'undefined' && res.recoveryToken) {
+        sessionStorage.setItem('retrace_recovery_token', res.recoveryToken)
+        window.location.href = '/dashboard'
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Recovery verification failed. Check your ID and PIN.'
+      setError(msg)
+    } finally {
+      setRecoveryBusy(false)
+    }
+  }
 
   const handleLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault()
@@ -2406,6 +2843,18 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
   const handleRegisterSubmit = async () => {
     setError(null)
     setLoading(true)
+
+    // Pre-save pending onboarding details so they survive Supabase email verification
+    // NOTE: Recovery PIN is NEVER stored in localStorage/sessionStorage.
+    savePendingOnboarding({
+      email: email.trim(),
+      backupPhone: backupPhone.trim() || undefined,
+      deviceName: deviceName.trim() || undefined,
+      deviceType: deviceType.trim() || undefined,
+      contactName: contactName.trim() || undefined,
+      contactPhone: contactPhone.trim() || undefined,
+    })
+
     try {
       // Store ONLY full_name in Supabase Auth user metadata.
       const result = await signUp({
@@ -2415,25 +2864,11 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
       })
 
       if (result.session && result.user) {
-        // Persist optional onboarding fields only when an authenticated session exists.
-        if (backupPhone.trim()) {
-          await updateProfileDetails(result.user.id, { backupPhone: backupPhone.trim() }).catch(() => {})
-        }
-        if (/^\d{4,6}$/.test(recoveryPin.trim())) {
+        // Persist optional onboarding fields immediately when an authenticated session exists.
+        await applyPendingOnboardingIfAny(result.user.id, result.user.email ?? email.trim()).catch(() => {})
+        // Save Recovery PIN securely via server-side API only when session is active
+        if (recoveryPin && /^\d{4,6}$/.test(recoveryPin.trim())) {
           await saveRecoveryPinServer(recoveryPin.trim()).catch(() => {})
-        }
-        if (deviceName.trim() && deviceType.trim()) {
-          await createDevice(result.user.id, {
-            name: deviceName.trim(),
-            type: deviceType.trim(),
-          }).catch(() => {})
-        }
-        if (contactName.trim() && contactPhone.trim()) {
-          await createTrustedContact(result.user.id, {
-            name: contactName.trim(),
-            relation: 'Trusted Contact',
-            phone: contactPhone.trim(),
-          }).catch(() => {})
         }
         await Promise.all([refreshProfile(), refreshData()])
         router.push('/dashboard')
@@ -2442,7 +2877,11 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
         setEmailConfirmationNeeded(true)
       }
     } catch (err: any) {
-      const msg = err?.message || 'Registration failed. Please check your details and try again.'
+      let msg = err?.message || 'Registration failed. Please check your details and try again.'
+      if (msg.includes('Database error saving new user')) {
+        msg =
+          'Database error saving new user: The Supabase trigger requires updated permissions. Please execute the deployment migration supabase/complete_features_migration.sql in Supabase SQL Editor.'
+      }
       setError(msg)
     } finally {
       setLoading(false)
@@ -2529,7 +2968,7 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
           )}
 
           {isRecover ? (
-            <div className="mt-8 flex flex-col gap-3">
+            <div className="mt-8 flex flex-col gap-4">
               {user ? (
                 <>
                   <Button href="/recovery" className="w-full">
@@ -2541,14 +2980,62 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
                 </>
               ) : (
                 <>
-                  <Button href="/login" className="w-full">
-                    Sign in with RETRACE credentials <ArrowRight className="size-4" />
-                  </Button>
-                  <Button variant="outline" onClick={() => setResetOpen((v) => !v)} className="w-full">
-                    <FileKey2 className="size-4" /> Reset forgotten password
-                  </Button>
+                  <form onSubmit={handleIndependentRecovery} className="flex flex-col gap-4">
+                    <label className="text-sm font-semibold">
+                      RETRACE Recovery ID
+                      <input
+                        value={recoveryIdInput}
+                        onChange={(e) => setRecoveryIdInput(e.target.value.toUpperCase())}
+                        disabled={recoveryBusy}
+                        placeholder="e.g., RTR-8F2A-91C4-USER"
+                        className="mt-2 w-full rounded-xl border border-[#dce5f2] px-4 py-3 font-mono text-sm tracking-wide outline-none focus:border-[#1463ff] disabled:bg-[#f6f9fc]"
+                      />
+                    </label>
+
+                    <label className="text-sm font-semibold">
+                      Recovery PIN (4–6 digits)
+                      <div className="relative mt-2">
+                        <input
+                          type={recoveryShowPin ? 'text' : 'password'}
+                          inputMode="numeric"
+                          maxLength={6}
+                          value={recoveryPinInput}
+                          onChange={(e) => setRecoveryPinInput(e.target.value.replace(/\D/g, ''))}
+                          disabled={recoveryBusy}
+                          placeholder="••••"
+                          className="w-full rounded-xl border border-[#dce5f2] px-4 py-3 pr-11 text-sm outline-none focus:border-[#1463ff] disabled:bg-[#f6f9fc]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setRecoveryShowPin(!recoveryShowPin)}
+                          className="absolute right-3 top-3 text-[#8192a8]"
+                        >
+                          {recoveryShowPin ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                        </button>
+                      </div>
+                    </label>
+
+                    <Button type="submit" disabled={recoveryBusy} className="mt-2 w-full">
+                      {recoveryBusy ? 'Verifying identity...' : 'Open recovery command center'}{' '}
+                      <ArrowRight className="size-4" />
+                    </Button>
+                  </form>
+
+                  <div className="mt-2 flex items-center justify-between border-t border-[#edf2f8] pt-4 text-xs text-[#71839a]">
+                    <Link href="/login" className="font-semibold text-[#1463ff] hover:underline">
+                      Sign in with account password
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() => setResetOpen((v) => !v)}
+                      className="font-semibold text-[#71839a] hover:text-[#1463ff]"
+                    >
+                      Reset password?
+                    </button>
+                  </div>
+
                   {resetOpen && (
-                    <form onSubmit={handlePasswordReset} className="mt-2 flex flex-col gap-3 rounded-xl bg-[#f5f8fd] p-4">
+                    <form onSubmit={handlePasswordReset} className="flex flex-col gap-3 rounded-xl bg-[#f5f8fd] p-4">
                       <label className="text-xs font-semibold text-[#27405e]">
                         Account email
                         <input
@@ -2566,8 +3053,9 @@ function AuthPage({ type, redirectMessage }: { type: string; redirectMessage?: s
                   )}
                 </>
               )}
-              <div className="mt-4 rounded-xl bg-[#f5f8fd] p-4 text-sm leading-6 text-[#637790]">
-                <Phone className="mr-2 inline size-4 text-[#1463ff]" /> Recovery actions are protected by Supabase Auth and Row Level Security.
+              <div className="mt-4 rounded-xl bg-[#f5f8fd] p-4 text-xs leading-5 text-[#637790]">
+                <ShieldCheck className="mr-1.5 inline size-4 text-[#1463ff]" />
+                Independent recovery allows access to your registered devices, latest locations, and recovery options without requiring your lost phone or third-party passwords.
               </div>
             </div>
           ) : (
@@ -2885,6 +3373,12 @@ export default function RetraceApp({ initialRoute }: { initialRoute?: string }) 
   const [dataLoading, setDataLoading] = useState(false)
   const [dataError, setDataError] = useState<string | null>(null)
 
+  // Independent Recovery Session State
+  const [recoverySession, setRecoverySession] = useState<IndependentRecoverySession | null>(null)
+  const [recoveryToken, setRecoveryToken] = useState<string | null>(null)
+
+  const isRecoveryMode = Boolean(recoverySession && recoveryToken)
+
   const loadProfile = useCallback(async (userId: string, isCancelled?: () => boolean) => {
     setProfileLoading(true)
     setProfileError(null)
@@ -2936,31 +3430,73 @@ export default function RetraceApp({ initialRoute }: { initialRoute?: string }) 
   const refreshProfile = useCallback(async () => {
     if (user?.id) {
       await loadProfile(user.id)
+    } else if (recoveryToken) {
+      const rec = await fetchRecoverySessionData(recoveryToken).catch(() => null)
+      if (rec?.profile) setProfile(rec.profile)
     }
-  }, [user?.id, loadProfile])
+  }, [user?.id, recoveryToken, loadProfile])
 
   const refreshData = useCallback(async () => {
     if (user?.id) {
       await loadData(user.id)
+    } else if (recoveryToken) {
+      const rec = await fetchRecoverySessionData(recoveryToken).catch(() => null)
+      if (rec) {
+        if (rec.devices) setDevices(rec.devices)
+        if (rec.contacts) setContacts(rec.contacts)
+        if (rec.recoveryRequests) setRecoveryRequests(rec.recoveryRequests)
+        if (rec.activityLogs) setActivityLogs(rec.activityLogs)
+      }
     }
-  }, [user?.id, loadData])
+  }, [user?.id, recoveryToken, loadData])
 
+  // Restore Independent Recovery Session from sessionStorage if present
+  useEffect(() => {
+    const storedRecToken =
+      typeof window !== 'undefined' ? sessionStorage.getItem('retrace_recovery_token') : null
+
+    if (storedRecToken) {
+      fetchRecoverySessionData(storedRecToken)
+        .then((data) => {
+          if (data.session) {
+            setRecoverySession(data.session)
+            setRecoveryToken(storedRecToken)
+            if (data.profile) setProfile(data.profile)
+            if (data.devices) setDevices(data.devices)
+            if (data.contacts) setContacts(data.contacts)
+            if (data.recoveryRequests) setRecoveryRequests(data.recoveryRequests)
+            if (data.activityLogs) setActivityLogs(data.activityLogs)
+            setLoading(false)
+          }
+        })
+        .catch(() => {
+          if (typeof window !== 'undefined') {
+            sessionStorage.removeItem('retrace_recovery_token')
+          }
+        })
+    }
+  }, [])
+
+  // Check Supabase Auth Session
   useEffect(() => {
     let mounted = true
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (mounted) {
-        setUser(session?.user ?? null)
-        setLoading(false)
-      }
-    }).catch(() => {
-      if (mounted) {
-        setLoading(false)
-      }
-    })
+    supabase.auth
+      .getSession()
+      .then(({ data: { session } }) => {
+        if (mounted) {
+          setUser(session?.user ?? null)
+          setLoading(false)
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setLoading(false)
+        }
+      })
 
     const {
-      data: { subscription }
+      data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
       if (mounted) {
         setUser(session?.user ?? null)
@@ -2974,20 +3510,33 @@ export default function RetraceApp({ initialRoute }: { initialRoute?: string }) 
     }
   }, [])
 
+  // Apply pending onboarding and fetch records when user logs in
   useEffect(() => {
     let cancelled = false
 
     if (!user?.id) {
-      setProfile(null)
-      setProfileError(null)
-      setProfileLoading(false)
-      setDevices([])
-      setContacts([])
-      setRecoveryRequests([])
-      setActivityLogs([])
-      setDataError(null)
-      setDataLoading(false)
+      if (!recoverySession) {
+        setProfile(null)
+        setProfileError(null)
+        setProfileLoading(false)
+        setDevices([])
+        setContacts([])
+        setRecoveryRequests([])
+        setActivityLogs([])
+        setDataError(null)
+        setDataLoading(false)
+      }
       return
+    }
+
+    // Apply any cached onboarding inputs from before email confirmation
+    if (user.email) {
+      applyPendingOnboardingIfAny(user.id, user.email).then((applied) => {
+        if (applied && !cancelled) {
+          loadProfile(user.id, () => cancelled)
+          loadData(user.id, () => cancelled)
+        }
+      })
     }
 
     loadProfile(user.id, () => cancelled)
@@ -2996,13 +3545,13 @@ export default function RetraceApp({ initialRoute }: { initialRoute?: string }) 
     return () => {
       cancelled = true
     }
-  }, [user?.id, loadProfile, loadData])
+  }, [user?.id, user?.email, recoverySession, loadProfile, loadData])
 
   useEffect(() => {
-    if (!loading && user && (route === '/login' || route === '/register')) {
+    if (!loading && (user || recoverySession) && (route === '/login' || route === '/register')) {
       router.replace('/dashboard')
     }
-  }, [loading, user, route, router])
+  }, [loading, user, recoverySession, route, router])
 
   const handleSignOut = async () => {
     await signOut()
@@ -3016,7 +3565,25 @@ export default function RetraceApp({ initialRoute }: { initialRoute?: string }) 
     setDataError(null)
   }
 
+  const exitRecoverySession = useCallback(async () => {
+    if (recoveryToken) {
+      await logoutRecoverySession(recoveryToken).catch(() => {})
+      if (typeof window !== 'undefined') {
+        sessionStorage.removeItem('retrace_recovery_token')
+      }
+    }
+    setRecoverySession(null)
+    setRecoveryToken(null)
+    setProfile(null)
+    setDevices([])
+    setContacts([])
+    setRecoveryRequests([])
+    setActivityLogs([])
+    router.push('/')
+  }, [recoveryToken, router])
+
   const isProtectedRoute = protectedRoutes.includes(route)
+  const isAuthenticated = Boolean(user || recoverySession)
 
   const authValue: AuthContextType = {
     user,
@@ -3030,9 +3597,12 @@ export default function RetraceApp({ initialRoute }: { initialRoute?: string }) 
     dataLoading,
     profileError,
     dataError,
+    recoverySession,
+    isRecoveryMode,
     refreshProfile,
     refreshData,
     signOut: handleSignOut,
+    exitRecoverySession,
   }
 
   if (loading && isProtectedRoute) {
@@ -3048,7 +3618,7 @@ export default function RetraceApp({ initialRoute }: { initialRoute?: string }) 
     )
   }
 
-  if (!loading && !user && isProtectedRoute) {
+  if (!loading && !isAuthenticated && isProtectedRoute) {
     return (
       <AuthContext.Provider value={authValue}>
         <AuthPage type="login" redirectMessage="Please sign in to access your recovery command center." />
@@ -3070,7 +3640,9 @@ export default function RetraceApp({ initialRoute }: { initialRoute?: string }) 
       {route === '/login' && <AuthPage type="login" />}
       {route === '/recover' && <AuthPage type="recover" />}
       {route === '/verify' && <Verify />}
-      {!['/', '/dashboard', '/devices', '/recovery', '/trusted-circle', '/emergency-passport', '/activity', '/settings', '/register', '/login', '/recover', '/verify'].includes(route) && <Landing />}
+      {route === '/sighting' && <SightingPortal />}
+      {route === '/verify-contact' && <GuardianPortal />}
+      {!['/', '/dashboard', '/devices', '/recovery', '/trusted-circle', '/emergency-passport', '/activity', '/settings', '/register', '/login', '/recover', '/verify', '/sighting', '/verify-contact'].includes(route) && <Landing />}
     </AuthContext.Provider>
   )
 }
