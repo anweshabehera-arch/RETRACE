@@ -7,7 +7,7 @@ import type { User } from '@supabase/supabase-js'
 import {
   Activity, ArrowLeft, ArrowRight, Battery, Bell, Check, CheckCircle2, CircleHelp,
   Clock3, CloudOff, ExternalLink, Eye, EyeOff, FileKey2, Fingerprint, Flame, Globe2,
-  Laptop, LockKeyhole, LogOut, MapPin, Menu, Navigation, Pencil,
+  Laptop, LockKeyhole, LogOut, Mail, MapPin, Menu, Navigation, Pencil,
   Phone, Plus, QrCode, Radar, Radio, RefreshCw, Search, Send, Settings, Shield, ShieldCheck,
   Smartphone, Sparkles, Trash2, UserRound, UsersRound, Wifi, X, Zap
 } from 'lucide-react'
@@ -2418,6 +2418,21 @@ function SettingsPage() {
   const [geoPermission, setGeoPermission] = useState<string>('Unknown')
   const [busy, setBusy] = useState(false)
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [emailCheckBusy, setEmailCheckBusy] = useState(false)
+  const [emailCheckResult, setEmailCheckResult] = useState<{
+    status: number
+    statusText: string
+    data?: {
+      service?: string
+      provider?: string
+      configured?: boolean
+      senderAddress?: string
+      appBaseUrl?: string
+      supportedEvents?: string[]
+      features?: Record<string, boolean>
+    } | null
+    error?: string | null
+  } | null>(null)
 
   useEffect(() => {
     if (profile) {
@@ -2442,6 +2457,61 @@ function SettingsPage() {
     } catch (err) {
       console.error('Sign out error:', err)
       router.push('/')
+    }
+  }
+
+  const handleCheckEmailConfig = async () => {
+    setEmailCheckBusy(true)
+    setEmailCheckResult(null)
+    try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession()
+
+      const token = session?.access_token
+
+      if (sessionError || !token) {
+        setEmailCheckResult({
+          status: 401,
+          statusText: 'Unauthorized',
+          error: 'No active Supabase authentication session. Please sign in again.',
+        })
+        return
+      }
+
+      const res = await fetch('/api/notifications/test', {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+
+      const json = await res.json().catch(() => null)
+      const statusText =
+        res.status === 200
+          ? 'OK'
+          : res.status === 401
+          ? 'Unauthorized'
+          : res.statusText || 'Response'
+
+      setEmailCheckResult({
+        status: res.status,
+        statusText,
+        data: res.ok ? json : null,
+        error: !res.ok ? (json?.error || `Request failed with HTTP status ${res.status}`) : null,
+      })
+    } catch (err: unknown) {
+      setEmailCheckResult({
+        status: 0,
+        statusText: 'Network Error',
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Failed to connect to email notification diagnostics endpoint.',
+      })
+    } finally {
+      setEmailCheckBusy(false)
     }
   }
 
@@ -2668,6 +2738,95 @@ function SettingsPage() {
                 In-app activity timeline is active. SMS/email alerts require external messaging integration.
               </span>
             </span>
+          </div>
+
+          <div className="rounded-2xl border border-[#e2eaf4] bg-white p-5">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-4">
+                <span className="grid size-11 place-items-center rounded-xl bg-[#edf4ff] text-[#1463ff]">
+                  <Mail className="size-5" />
+                </span>
+                <div>
+                  <span className="block font-semibold">Email Service Configuration</span>
+                  <span className="mt-1 block text-sm text-[#8192a8]">
+                    Verify server-side Resend email configuration and API readiness.
+                  </span>
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                disabled={emailCheckBusy}
+                onClick={handleCheckEmailConfig}
+              >
+                {emailCheckBusy ? (
+                  <>
+                    <RefreshCw className="size-4 animate-spin" /> Checking...
+                  </>
+                ) : (
+                  'Email Configuration Check'
+                )}
+              </Button>
+            </div>
+
+            {emailCheckResult && (
+              <div className="mt-5 rounded-xl border border-[#dce5f2] bg-[#f8fbff] p-4 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#e2eaf4] pb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-[#0b1b35]">HTTP Status:</span>
+                    <span
+                      className={`inline-flex items-center rounded-md px-2 py-0.5 font-mono text-[11px] font-semibold ${
+                        emailCheckResult.status === 200
+                          ? 'bg-[#eaf8f0] text-[#1f8056]'
+                          : 'bg-[#fff5f5] text-[#c53030]'
+                      }`}
+                    >
+                      {emailCheckResult.status} {emailCheckResult.statusText}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-[#0b1b35]">Configuration:</span>
+                    <span
+                      className={`inline-flex items-center rounded-md px-2 py-0.5 font-mono text-[11px] font-semibold ${
+                        emailCheckResult.data?.configured
+                          ? 'bg-[#eaf8f0] text-[#1f8056]'
+                          : 'bg-[#fff8eb] text-[#b45309]'
+                      }`}
+                    >
+                      {emailCheckResult.data?.configured ? 'Configured' : 'Not Configured'}
+                    </span>
+                  </div>
+                </div>
+
+                {emailCheckResult.error ? (
+                  <p className="mt-3 font-medium text-[#c53030]">{emailCheckResult.error}</p>
+                ) : (
+                  <div className="mt-3 grid gap-2 text-[#4a5f78] sm:grid-cols-2">
+                    <div>
+                      <span className="font-semibold text-[#0b1b35]">Service:</span>{' '}
+                      {emailCheckResult.data?.service ?? 'Unknown'}
+                    </div>
+                    <div>
+                      <span className="font-semibold text-[#0b1b35]">Provider:</span>{' '}
+                      {emailCheckResult.data?.provider ?? 'Unknown'}
+                    </div>
+                    <div>
+                      <span className="font-semibold text-[#0b1b35]">Sender Address:</span>{' '}
+                      {emailCheckResult.data?.senderAddress ?? 'Not configured'}
+                    </div>
+                    <div>
+                      <span className="font-semibold text-[#0b1b35]">App Base URL:</span>{' '}
+                      {emailCheckResult.data?.appBaseUrl ?? 'Not configured'}
+                    </div>
+                    {Array.isArray(emailCheckResult.data?.supportedEvents) && (
+                      <div className="sm:col-span-2 mt-1">
+                        <span className="font-semibold text-[#0b1b35]">Supported Events ({emailCheckResult.data.supportedEvents.length}):</span>{' '}
+                        <span>{emailCheckResult.data.supportedEvents.join(', ')}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="rounded-2xl border border-[#e2eaf4] bg-white">
