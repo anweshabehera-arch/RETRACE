@@ -5,10 +5,18 @@ import type { Database } from './types'
 
 const SCRYPT_KEYLEN = 64
 const RECOVERY_SESSION_DURATION_MS = 2 * 60 * 60 * 1000 // 2 hours
-const RECOVERY_SECRET =
-  cleanEnv(process.env.RETRACE_SESSION_SECRET) ||
-  resolveSupabaseCredentials().key ||
-  'retrace-secure-session-salt-2026'
+
+/**
+ * Resolves the server-side recovery session secret.
+ * Fails closed if RETRACE_SESSION_SECRET is missing or insecure.
+ */
+export function getRecoverySessionSecret(): string {
+  const secret = cleanEnv(process.env.RETRACE_SESSION_SECRET)
+  if (!secret || secret.length < 16) {
+    throw new Error('Server configuration error: RETRACE_SESSION_SECRET is required and must be at least 16 characters.')
+  }
+  return secret
+}
 
 /**
  * Create a request-scoped Supabase client authenticated with the caller's JWT.
@@ -122,20 +130,24 @@ export interface RecoverySessionPayload {
 }
 
 export function createRecoverySessionToken(payload: Omit<RecoverySessionPayload, 'issuedAt' | 'expiresAt'>): string {
+  const secret = getRecoverySessionSecret()
   const issuedAt = Date.now()
   const expiresAt = issuedAt + RECOVERY_SESSION_DURATION_MS
   const body = JSON.stringify({ ...payload, issuedAt, expiresAt })
   const bodyB64 = Buffer.from(body).toString('base64url')
-  const signature = createHmac('sha256', RECOVERY_SECRET).update(bodyB64).digest('base64url')
+  const signature = createHmac('sha256', secret).update(bodyB64).digest('base64url')
   return `${bodyB64}.${signature}`
 }
 
 export function verifyRecoverySessionToken(token: string): RecoverySessionPayload | null {
   try {
+    const secret = cleanEnv(process.env.RETRACE_SESSION_SECRET)
+    if (!secret || secret.length < 16) return null // Fail closed if secret missing or insecure
+
     const parts = token.split('.')
     if (parts.length !== 2) return null
     const [bodyB64, signature] = parts
-    const expectedSig = createHmac('sha256', RECOVERY_SECRET).update(bodyB64).digest('base64url')
+    const expectedSig = createHmac('sha256', secret).update(bodyB64).digest('base64url')
 
     const sigBuf = Buffer.from(signature)
     const expBuf = Buffer.from(expectedSig)

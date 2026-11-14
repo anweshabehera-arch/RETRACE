@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server'
-import { createHmac, timingSafeEqual } from 'node:crypto'
 import {
   getAuthenticatedServerClient,
   getRecoverySessionFromRequest,
@@ -10,52 +9,10 @@ import {
   notifyQuorumApprovalRequested,
   notifyQuorumDecisionSubmitted,
 } from '@/lib/email/notifications'
-
-const QUORUM_SECRET =
-  process.env.RETRACE_QUORUM_SECRET ||
-  process.env.RETRACE_SESSION_SECRET ||
-  'retrace-quorum-signature-secret-2026'
-
-interface QuorumTokenPayload {
-  requestId: string
-  contactId: string
-  actionType: string
-  userId: string
-  issuedAt: number
-  expiresAt: number
-}
-
-function createQuorumVoteToken(params: {
-  requestId: string
-  contactId: string
-  actionType: string
-  userId: string
-}): string {
-  const issuedAt = Date.now()
-  const expiresAt = issuedAt + 24 * 60 * 60 * 1000 // 24 hours validity
-  const payload: QuorumTokenPayload = { ...params, issuedAt, expiresAt }
-  const bodyB64 = Buffer.from(JSON.stringify(payload)).toString('base64url')
-  const sig = createHmac('sha256', QUORUM_SECRET).update(bodyB64).digest('base64url')
-  return `${bodyB64}.${sig}`
-}
-
-function verifyQuorumVoteToken(token: string): QuorumTokenPayload | null {
-  try {
-    const [bodyB64, sig] = token.split('.')
-    if (!bodyB64 || !sig) return null
-    const expectedSig = createHmac('sha256', QUORUM_SECRET).update(bodyB64).digest('base64url')
-    const sigBuf = Buffer.from(sig)
-    const expBuf = Buffer.from(expectedSig)
-    if (sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) {
-      return null
-    }
-    const payload = JSON.parse(Buffer.from(bodyB64, 'base64url').toString('utf8')) as QuorumTokenPayload
-    if (Date.now() > payload.expiresAt) return null
-    return payload
-  } catch {
-    return null
-  }
-}
+import {
+  createQuorumVoteToken,
+  verifyQuorumVoteToken,
+} from '@/lib/security/quorum'
 
 export async function GET(request: Request) {
   try {
