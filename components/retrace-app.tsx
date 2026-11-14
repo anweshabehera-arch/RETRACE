@@ -2433,6 +2433,13 @@ function SettingsPage() {
     } | null
     error?: string | null
   } | null>(null)
+  const [testEmailBusy, setTestEmailBusy] = useState(false)
+  const [testEmailResult, setTestEmailResult] = useState<{
+    success: boolean
+    message: string
+    recipient?: string
+    messageId?: string
+  } | null>(null)
 
   useEffect(() => {
     if (profile) {
@@ -2512,6 +2519,64 @@ function SettingsPage() {
       })
     } finally {
       setEmailCheckBusy(false)
+    }
+  }
+
+  const handleSendTestEmail = async () => {
+    setTestEmailBusy(true)
+    setTestEmailResult(null)
+    try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession()
+
+      const token = session?.access_token
+
+      if (sessionError || !token) {
+        setTestEmailResult({
+          success: false,
+          message: 'No active authentication session. Please sign in again.',
+        })
+        return
+      }
+
+      const res = await fetch('/api/notifications/test', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ template: 'security_event' }),
+      })
+
+      const json = await res.json().catch(() => null)
+
+      if (res.ok && json?.success) {
+        setTestEmailResult({
+          success: true,
+          recipient: json.recipient,
+          messageId: json.messageId,
+          message: `Test email sent successfully to ${json.recipient || user?.email || 'your account email'}.${json.messageId ? ` (ID: ${json.messageId})` : ''}`,
+        })
+      } else {
+        const errorMsg =
+          json?.error || json?.message || `Failed to send test email (HTTP ${res.status}).`
+        setTestEmailResult({
+          success: false,
+          message: errorMsg,
+        })
+      }
+    } catch (err: unknown) {
+      setTestEmailResult({
+        success: false,
+        message:
+          err instanceof Error
+            ? err.message
+            : 'Network error while requesting test email delivery.',
+      })
+    } finally {
+      setTestEmailBusy(false)
     }
   }
 
@@ -2753,20 +2818,54 @@ function SettingsPage() {
                   </span>
                 </div>
               </div>
-              <Button
-                variant="outline"
-                disabled={emailCheckBusy}
-                onClick={handleCheckEmailConfig}
-              >
-                {emailCheckBusy ? (
-                  <>
-                    <RefreshCw className="size-4 animate-spin" /> Checking...
-                  </>
-                ) : (
-                  'Email Configuration Check'
-                )}
-              </Button>
+              <div className="flex flex-wrap items-center gap-2.5">
+                <Button
+                  variant="outline"
+                  disabled={emailCheckBusy || testEmailBusy}
+                  onClick={handleCheckEmailConfig}
+                >
+                  {emailCheckBusy ? (
+                    <>
+                      <RefreshCw className="size-4 animate-spin" /> Checking...
+                    </>
+                  ) : (
+                    'Email Configuration Check'
+                  )}
+                </Button>
+                <Button
+                  variant="primary"
+                  disabled={emailCheckBusy || testEmailBusy}
+                  onClick={handleSendTestEmail}
+                >
+                  {testEmailBusy ? (
+                    <>
+                      <RefreshCw className="size-4 animate-spin" /> Sending...
+                    </>
+                  ) : (
+                    <>
+                      <Send className="size-4" /> Send Test Email
+                    </>
+                  )}
+                </Button>
+              </div>
             </div>
+
+            {testEmailResult && (
+              <div
+                className={`mt-4 rounded-xl border p-3.5 text-xs font-medium ${
+                  testEmailResult.success
+                    ? 'border-[#b9ebd2] bg-[#eaf8f0] text-[#1f8056]'
+                    : 'border-[#fcdada] bg-[#fff5f5] text-[#c53030]'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  {testEmailResult.success && (
+                    <CheckCircle2 className="size-4 shrink-0" />
+                  )}
+                  <span>{testEmailResult.message}</span>
+                </div>
+              </div>
+            )}
 
             {emailCheckResult && (
               <div className="mt-5 rounded-xl border border-[#dce5f2] bg-[#f8fbff] p-4 text-xs">
